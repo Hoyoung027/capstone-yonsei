@@ -1,0 +1,27 @@
+# 실험 결과
+results/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.env
+
+# Jupyter
+.ipynb_checkpoints/
+
+# IDE
+.vscode/
+.idea/
+
+# 빌드 / 캐시
+*.so
+*.egg
+dist/
+build/
