@@ -22,7 +22,7 @@
 ### 1. 빌드 도구
 
 ```bash
-pip install --no-cache-dir ninja packaging psutil cmake
+pip install --no-cache-dir wheel ninja packaging psutil cmake
 ```
 
 ### 2. PyTorch (CUDA 12.1)
