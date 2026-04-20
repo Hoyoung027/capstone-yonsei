@@ -18,13 +18,10 @@ import pathlib
 import torch
 import flashinfer
 from flash_attn import flash_attn_func, flash_attn_varlen_func
-from flashinfer.jit.attention.modules import (
-    get_single_decode_uri,
-    get_single_prefill_uri,
-)
+from flashinfer.jit.attention.modules import get_single_prefill_uri
 
-WARMUP  = 50
-REPEAT  = 200
+WARMUP  = 100
+REPEAT  = 100
 DTYPE   = torch.float16
 DEVICE  = "cuda"
 SEP     = "=" * 100
@@ -74,49 +71,6 @@ def get_prefill_tile_params(fn) -> dict:
                 "NUM_MMA_KV":  num_mma_kv,
                 "NUM_WARPS_Q": num_warps_q,
                 "NUM_WARPS_KV":num_warps_kv,
-            }
-    return {}
-
-
-def get_decode_tile_params(fn) -> dict:
-    """
-    실행된 FlashInfer decode 커널명에서 타일 설정을 추출한다.
-
-    커널 템플릿: SingleDecodeWithKVCacheKernel<
-        POS_ENC, NUM_STAGES_SMEM,
-        tile_size_per_bdx, vec_size, bdx, bdy, bdz, ...>
-
-    KV_TILE (한 iteration에서 처리하는 KV 토큰 수)
-        = tile_size_per_bdx * bdy * bdz
-    """
-    with torch.profiler.profile(
-        activities=[torch.profiler.ProfilerActivity.CUDA]
-    ) as prof:
-        fn()
-        torch.cuda.synchronize()
-
-    for e in prof.key_averages():
-        m = re.search(
-            r'SingleDecodeWithKVCacheKernel<[^,]+,\s*(\d+)u,\s*(\d+)u,'
-            r'\s*(\d+)u,\s*(\d+)u,\s*(\d+)u,\s*(\d+)u',
-            e.key,
-        )
-        if m:
-            num_stages       = int(m.group(1))
-            tile_size_per_bdx= int(m.group(2))
-            vec_size         = int(m.group(3))
-            bdx              = int(m.group(4))
-            bdy              = int(m.group(5))
-            bdz              = int(m.group(6))
-            kv_tile          = tile_size_per_bdx * bdy * bdz
-            return {
-                "KV_TILE":          kv_tile,
-                "tile_size_per_bdx":tile_size_per_bdx,
-                "vec_size":         vec_size,
-                "bdx":              bdx,
-                "bdy":              bdy,
-                "bdz":              bdz,
-                "NUM_STAGES_SMEM":  num_stages,
             }
     return {}
 
@@ -214,15 +168,26 @@ def run_prefill(seq_lengths, num_heads=32, head_dim=128, dtype=DTYPE):
 # Batch Prefill — Uniform
 # ──────────────────────────────────────────────
 
+# total_tokens 고정, 분포만 다르게 — uniform / mild / moderate / extreme
+# 3개 total 그룹 × 4개 분포 = 12 configs (batch=4 고정)
 DEFAULT_RAGGED_CONFIGS = [
-    [8,   16,  32,   64],
-    [64,  128, 256,  512],
-    [128, 256, 512,  1024],
-    [256, 512, 1024, 2048],
-    [512, 1024, 2048, 4096],
-    [1024, 2048, 4096, 8192],
-    [16,  128, 512,  2048],   # 극단적 혼합
-    [64,  64,  64,   8192],   # 하나만 긴 경우
+    # total = 4096
+    [1024, 1024, 1024, 1024],  # uniform
+    [512,  768,  1024, 1792],  # mild      (1:1.5:2:3.5)
+    [256,  512,  1024, 2304],  # moderate  (1:2:4:9)
+    [64,   64,   64,   3904],  # extreme   (1:1:1:61)
+
+    # total = 16384
+    [4096, 4096, 4096, 4096],  # uniform
+    [2048, 3072, 4096, 7168],  # mild
+    [1024, 2048, 4096, 9216],  # moderate
+    [256,  256,  256,  15616], # extreme
+
+    # total = 32768
+    [8192, 8192, 8192, 8192],  # uniform
+    [4096, 6144, 8192, 14336], # mild
+    [2048, 4096, 8192, 18432], # moderate
+    [512,  512,  512,  31232], # extreme
 ]
 
 
@@ -375,62 +340,6 @@ def run_batch_prefill_ragged(ragged_configs, num_heads=32, head_dim=128, dtype=D
 
 
 # ──────────────────────────────────────────────
-# Decode
-# ──────────────────────────────────────────────
-
-def run_decode(kv_lengths, num_heads=32, head_dim=128, dtype=DTYPE):
-    print(f"\n  {'kv_len':>8}  "
-          f"{'KV_TILE':>8}  {'tile/bdx':>9}  {'vec_sz':>7}  {'bdx':>4}  {'bdy':>4}  {'bdz':>4}  {'stages':>7}  "
-          f"{'FA2(ms)':>9}  {'FI(ms)':>8}  {'FA2 TFLOPS':>11}  {'FI TFLOPS':>10}  {'FI/FA2':>7}")
-    print(f"  {'-'*115}")
-
-    rows = []
-
-    for kv_len in kv_lengths:
-        q_fi = torch.randn(num_heads, head_dim, device=DEVICE, dtype=dtype)
-        k    = torch.randn(kv_len, num_heads, head_dim, device=DEVICE, dtype=dtype)
-        v    = torch.randn(kv_len, num_heads, head_dim, device=DEVICE, dtype=dtype)
-        q_fa = q_fi.unsqueeze(0).unsqueeze(0)
-        k_fa = k.unsqueeze(0); v_fa = v.unsqueeze(0)
-
-        tile = get_decode_tile_params(
-            lambda: flashinfer.single_decode_with_kv_cache(q_fi, k, v)
-        )
-
-        ms_fa2 = bench_ms(lambda: flash_attn_func(q_fa, k_fa, v_fa, causal=False))
-        ms_fi  = bench_ms(lambda: flashinfer.single_decode_with_kv_cache(q_fi, k, v))
-
-        flops   = attention_flops(1, kv_len, num_heads, head_dim, causal=False)
-        tf_fa2  = tflops(flops, ms_fa2)
-        tf_fi   = tflops(flops, ms_fi)
-        speedup = ms_fa2 / ms_fi
-
-        kv_tile = tile.get("KV_TILE",          "?")
-        tpb     = tile.get("tile_size_per_bdx", "?")
-        vsz     = tile.get("vec_size",          "?")
-        bdx     = tile.get("bdx",               "?")
-        bdy     = tile.get("bdy",               "?")
-        bdz     = tile.get("bdz",               "?")
-        stages  = tile.get("NUM_STAGES_SMEM",   "?")
-
-        print(f"  {kv_len:>8}  "
-              f"{str(kv_tile):>8}  {str(tpb):>9}  {str(vsz):>7}  "
-              f"{str(bdx):>4}  {str(bdy):>4}  {str(bdz):>4}  {str(stages):>7}  "
-              f"{ms_fa2:>9.4f}  {ms_fi:>8.4f}  {tf_fa2:>11.3f}  {tf_fi:>10.3f}  {speedup:>6.2f}x")
-
-        rows.append({
-            "scenario": "decode", "kv_len": kv_len,
-            "num_heads": num_heads, "head_dim": head_dim,
-            "dtype": str(dtype).split(".")[-1],
-            **{k: str(v) for k, v in tile.items()},
-            "ms_fa2": round(ms_fa2, 4), "ms_fi": round(ms_fi, 4),
-            "tflops_fa2": round(tf_fa2, 3), "tflops_fi": round(tf_fi, 3),
-            "speedup_fi_vs_fa2": round(speedup, 3),
-        })
-    return rows
-
-
-# ──────────────────────────────────────────────
 # 메인
 # ──────────────────────────────────────────────
 
@@ -441,13 +350,16 @@ if __name__ == "__main__":
     parser.add_argument("--num_heads", type=int, default=32)
     parser.add_argument("--num_kv_heads", type=int, default=32)
     parser.add_argument("--head_dim", type=int, default=128)
+    _seq_lengths = (
+        [8, 16, 32, 64] +                          # 작은 값
+        list(range(128, 8192 + 1, 128)) +           # 128 간격 (128~8192)
+        [16384, 32768, 65536, 131072, 262144]        # 2배씩 (8192 이후)
+    )
     parser.add_argument("--seq_lengths", type=int, nargs="+",
-                        default=[8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192])
-    parser.add_argument("--kv_lengths", type=int, nargs="+",
-                        default=[64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384])
-    parser.add_argument("--no_decode", action="store_true")
+                        default=_seq_lengths)
     parser.add_argument("--no_prefill", action="store_true")
     parser.add_argument("--no_batch_prefill", action="store_true")
+    parser.add_argument("--no_batch_prefill_ragged", action="store_true")
     parser.add_argument("--batch_sizes", type=int, nargs="+",
                         default=[1, 2, 4, 8, 16, 32])
     args = parser.parse_args()
@@ -463,8 +375,6 @@ if __name__ == "__main__":
     print(f"\n  [타일 설정은 torch profiler로 실제 실행된 CUDA 커널명에서 추출]")
     print(f"  Prefill 커널: KernelTraits<.., CTA_TILE_Q, NUM_MMA_Q, NUM_MMA_KV, .., NUM_WARPS_Q, NUM_WARPS_KV, ..>")
     print(f"               CTA_TILE_KV = NUM_MMA_KV × NUM_WARPS_KV × 16")
-    print(f"  Decode  커널: SingleDecodeWithKVCacheKernel<.., tile_size_per_bdx, vec_size, bdx, bdy, bdz, ..>")
-    print(f"               KV_TILE = tile_size_per_bdx × bdy × bdz")
     print(SEP)
 
     all_results = []
@@ -481,12 +391,11 @@ if __name__ == "__main__":
             head_dim=args.head_dim,
         )
 
-    # ── Batch Prefill ──
+    # ── Batch Prefill Uniform ──
     if not args.no_batch_prefill:
         print(f"\n{'─'*100}")
         print(f"  BATCH PREFILL — Uniform  (num_heads={args.num_heads}, head_dim={args.head_dim}, causal=True)")
         print(f"  batch_sizes={args.batch_sizes},  seq_lengths={args.seq_lengths}")
-        print(f"  CTA_TILE_Q: seq≤16→16,  16<seq≤64→64,  seq>64→128  (single seq 기준과 동일)")
         print(f"{'─'*100}")
         all_results += run_batch_prefill_uniform(
             seq_lengths=args.seq_lengths,
@@ -495,9 +404,11 @@ if __name__ == "__main__":
             head_dim=args.head_dim,
         )
 
+    # ── Batch Prefill Ragged ──
+    if not args.no_batch_prefill_ragged:
         print(f"\n{'─'*100}")
         print(f"  BATCH PREFILL — Ragged  (num_heads={args.num_heads}, head_dim={args.head_dim}, causal=True)")
-        print(f"  한 배치 안에 서로 다른 길이의 시퀀스 혼합 → CTA_TILE_Q가 max_seq_len 기준인지 확인")
+        print(f"  total_tokens 고정, 분포 변화: uniform / mild / moderate / extreme")
         print(f"{'─'*100}")
         all_results += run_batch_prefill_ragged(
             ragged_configs=DEFAULT_RAGGED_CONFIGS,
@@ -505,24 +416,31 @@ if __name__ == "__main__":
             head_dim=args.head_dim,
         )
 
-    # ── Decode ──
-    if not args.no_decode:
-        print(f"\n{'─'*100}")
-        print(f"  DECODE  (num_heads={args.num_heads}, head_dim={args.head_dim}, Q seq_len=1)")
-        print(f"{'─'*100}")
-        all_results += run_decode(
-            kv_lengths=args.kv_lengths,
-            num_heads=args.num_heads,
-            head_dim=args.head_dim,
-        )
-
     # ── CSV 저장 ──
     csv_path = RESULTS_DIR / "bench_results.csv"
-    fieldnames = list(dict.fromkeys(k for r in all_results for k in r.keys()))
+
+    # 기존 데이터 로드
+    existing = []
+    existing_fieldnames = []
+    if csv_path.exists():
+        with open(csv_path, newline="") as f:
+            reader = csv.DictReader(f)
+            existing_fieldnames = reader.fieldnames or []
+            existing = list(reader)
+
+    # 이번 실행 시나리오의 기존 행 제거 후 새 결과로 교체
+    new_scenarios = {r["scenario"] for r in all_results}
+    existing = [r for r in existing if r.get("scenario") not in new_scenarios]
+
+    merged = existing + all_results
+    fieldnames = list(dict.fromkeys(
+        list(existing_fieldnames) + [k for r in all_results for k in r.keys()]
+    ))
+
     with open(csv_path, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore", restval="")
         writer.writeheader()
-        writer.writerows(all_results)
+        writer.writerows(merged)
 
     print(f"\n{SEP}")
     print(f"  결과 저장: {csv_path}")
