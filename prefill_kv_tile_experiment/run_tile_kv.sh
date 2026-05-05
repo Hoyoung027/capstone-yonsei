@@ -3,16 +3,14 @@
 #
 # 순서:
 #   1) FlashInfer auto baseline_before
-#   2) forced NUM_MMA_KV=1
-#   3) forced NUM_MMA_KV=2
-#   4) forced NUM_MMA_KV=4
-#   5) forced NUM_MMA_KV=8
-#   6) FlashInfer auto baseline_after
+#   2) forced NUM_MMA_KV values
+#   3) FlashInfer auto baseline_after
 #
 # 사용법:
 #   bash run_tile_kv.sh
 #   bash run_tile_kv.sh llama
 #   bash run_tile_kv.sh llama3_8b qwen2.5_7b
+#   MMA_KV_VALS="1 2 3 4 5 6 7" bash run_tile_kv.sh llama3_8b
 #   nohup bash run_tile_kv.sh > results/logs/run_tile_kv_$(date +%Y%m%d).log 2>&1 &
 
 set -e
@@ -23,7 +21,11 @@ if [ ${#TARGETS[@]} -eq 0 ]; then
     TARGETS=(llama qwen gemma)
 fi
 
-MMA_KV_VALS=(1 2 4 8)
+if [ -n "${MMA_KV_VALS:-}" ]; then
+    read -r -a MMA_KV_VALS <<< "$MMA_KV_VALS"
+else
+    MMA_KV_VALS=(1 2 4 8)
+fi
 
 # 예외 상황에서도 가상환경 안의 prefill.cuh를 원본 상태로 되돌린다.
 _restore_on_exit() { python patch_prefill.py restore 2>/dev/null || true; }

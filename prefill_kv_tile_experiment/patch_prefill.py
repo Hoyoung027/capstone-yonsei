@@ -22,7 +22,7 @@ PREFILL_CUH = Path(
 )
 BACKUP = PREFILL_CUH.with_suffix(PREFILL_CUH.suffix + ".orig")
 
-VALID_NUM_MMA_KV = {1, 2, 4, 8}
+VALID_NUM_MMA_KV = {1, 2, 3, 4, 5, 6, 7, 8}
 DISPATCH_TOKEN = "DISPATCH_NUM_MMA_KV("
 ISINVALID_EXPR = (
     "NUM_MMA_Q * (8 * NUM_MMA_D_VO + 2 * sizeof(DTypeQKAccum) * NUM_MMA_KV) >= 256"

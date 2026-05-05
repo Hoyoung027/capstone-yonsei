@@ -30,10 +30,14 @@ PLOTS_DIR = ROOT / "results" / "plots"
 MMA_STYLES = {
     1: dict(color="#2e86c1", marker="o"),
     2: dict(color="#27ae60", marker="s"),
+    3: dict(color="#8e44ad", marker="v"),
     4: dict(color="#e67e22", marker="^"),
+    5: dict(color="#d35400", marker="p"),
+    6: dict(color="#16a085", marker="h"),
+    7: dict(color="#7f8c8d", marker="x"),
     8: dict(color="#c0392b", marker="D"),
 }
-
+    
 SEQ_TICKS = [128, 256, 512, 1024, 2048, 4096, 8192]
 
 
