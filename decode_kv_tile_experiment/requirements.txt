@@ -1,0 +1,5 @@
+flashinfer-python @ file:///root/flashinfer
+matplotlib
+ninja==1.13.0
+pandas
+torch==2.5.1+cu121
