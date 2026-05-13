@@ -8,13 +8,17 @@ Output:
     results/plots/llama3_8b_decode_speedup_vs_baseline.png
     results/plots/llama3_8b_decode_latency.png
     results/plots/llama3_8b_decode_baseline_drift.png
+    results/plots/all_models_decode_speedup_vs_baseline.png
 
 Usage:
     cd /root/capstone-yonsei/decode_kv_tile_experiment
     /root/venv/bin/python plot.py
+    /root/venv/bin/python plot.py --all
+    /root/venv/bin/python plot.py --all --xscale log
 """
 
 import argparse
+import math
 import pathlib
 import re
 
@@ -41,10 +45,16 @@ TILE_STYLES = {
 KV_TICKS = [128, 256, 512, 1024, 2048, 4096, 8192]
 
 
-def format_kv_axis(ax) -> None:
-    ax.set_xticks(KV_TICKS)
+def format_kv_axis(ax, xscale: str) -> None:
+    if xscale == "log":
+        ax.set_xscale("log", base=2)
+        ax.set_xticks(KV_TICKS)
+        ax.xaxis.set_minor_formatter(ticker.NullFormatter())
+    else:
+        ax.set_xscale("linear")
+        ax.xaxis.set_major_locator(ticker.MultipleLocator(1024))
+        ax.xaxis.set_minor_locator(ticker.MultipleLocator(512))
     ax.xaxis.set_major_formatter(ticker.FuncFormatter(lambda x, _: f"{int(x)}"))
-    ax.xaxis.set_minor_formatter(ticker.NullFormatter())
 
 
 def parse_label(label: str) -> tuple[str, str, int | None]:
@@ -101,7 +111,7 @@ def baseline_series(df: pd.DataFrame, mode: str) -> pd.Series:
     return ((before.loc[common] + after.loc[common]) / 2).rename("baseline_ms")
 
 
-def plot_speedup(df: pd.DataFrame, model: str, baseline_mode: str) -> pathlib.Path:
+def plot_speedup(df: pd.DataFrame, model: str, baseline_mode: str, xscale: str) -> pathlib.Path:
     model_df = df[df["model"] == model].copy()
     base = baseline_series(model_df, baseline_mode)
     exps = model_df[model_df["phase"] == "experiment"]
@@ -125,8 +135,8 @@ def plot_speedup(df: pd.DataFrame, model: str, baseline_mode: str) -> pathlib.Pa
         ax.plot(
             speedup.index,
             speedup.values,
-            lw=2,
-            ms=4,
+            lw=1.35,
+            ms=2.4,
             label=f"tile/bdx={tile} (KV_TILE={kv_tile_text})",
             **style,
         )
@@ -139,31 +149,118 @@ def plot_speedup(df: pd.DataFrame, model: str, baseline_mode: str) -> pathlib.Pa
     ax.set_title(f"{model} Decode KV Tile Speedup vs FlashInfer Auto Baseline")
     ax.set_xlabel("kv_len")
     ax.set_ylabel("Speedup by latency: baseline_ms / experiment_ms")
-    ax.set_xscale("log", base=2)
-    format_kv_axis(ax)
+    format_kv_axis(ax, xscale)
     ax.grid(True, which="both", ls=":", alpha=0.45)
-    ax.legend(loc="best", fontsize=8)
+    handles, labels = ax.get_legend_handles_labels()
+    ax.legend(
+        handles,
+        labels,
+        loc="upper center",
+        bbox_to_anchor=(0.5, -0.16),
+        ncol=3,
+        fontsize=8,
+        frameon=True,
+    )
 
     if summary_lines:
         ax.text(
-            0.02,
-            0.02,
+            1.02,
+            0.5,
             "\n".join(summary_lines),
             transform=ax.transAxes,
             fontsize=8,
-            va="bottom",
+            va="center",
+            ha="left",
             bbox=dict(boxstyle="round,pad=0.35", fc="white", ec="#cccccc", alpha=0.9),
         )
 
     PLOTS_DIR.mkdir(parents=True, exist_ok=True)
     out = PLOTS_DIR / f"{model}_decode_speedup_vs_baseline.png"
-    fig.tight_layout()
+    fig.subplots_adjust(right=0.78, bottom=0.25)
     fig.savefig(out, dpi=180)
     plt.close(fig)
     return out
 
 
-def plot_latency(df: pd.DataFrame, model: str) -> pathlib.Path:
+def iter_speedup_series(df: pd.DataFrame, model: str, baseline_mode: str):
+    model_df = df[df["model"] == model].copy()
+    base = baseline_series(model_df, baseline_mode)
+    exps = model_df[model_df["phase"] == "experiment"]
+    for tile, grp in sorted(exps.groupby("forced_tile"), key=lambda item: int(item[0])):
+        tile = int(tile)
+        g = grp.sort_values("kv_len").set_index("kv_len")
+        common = g.index.intersection(base.index)
+        if common.empty:
+            continue
+        kv_tiles = sorted(g.loc[common, "KV_TILE_TOKENS"].dropna().astype(int).unique().tolist())
+        kv_tile_text = kv_tiles[0] if len(kv_tiles) == 1 else ",".join(map(str, kv_tiles))
+        yield tile, kv_tile_text, base.loc[common] / g.loc[common, "ms"]
+
+
+def plot_all_model_speedup(
+    df: pd.DataFrame, models: list[str], baseline_mode: str, xscale: str
+) -> pathlib.Path:
+    n_models = len(models)
+    ncols = 2 if n_models > 1 else 1
+    nrows = math.ceil(n_models / ncols)
+    fig, axes = plt.subplots(nrows, ncols, figsize=(10 * ncols, 4.8 * nrows), squeeze=False)
+
+    for ax, model in zip(axes.flat, models):
+        baseline_line = ax.axhline(1.0, color="black", lw=1.4, ls="--", label="Baseline (=1.0)")
+        for tile, kv_tile_text, speedup in iter_speedup_series(df, model, baseline_mode):
+            style = TILE_STYLES.get(tile, {})
+            ax.plot(
+                speedup.index,
+                speedup.values,
+                lw=1.1,
+                ms=2.0,
+                label=f"tile/bdx={tile} (KV_TILE={kv_tile_text})",
+                **style,
+            )
+
+        ax.set_title(model)
+        ax.set_xlabel("kv_len")
+        ax.set_ylabel("Speedup")
+        format_kv_axis(ax, xscale)
+        ax.grid(True, which="both", ls=":", alpha=0.45)
+
+    for ax in axes.flat[n_models:]:
+        ax.axis("off")
+
+    legend_handles = [baseline_line]
+    legend_labels = ["Baseline (=1.0)"]
+    for tile in sorted(TILE_STYLES):
+        style = TILE_STYLES[tile]
+        handle = plt.Line2D(
+            [0],
+            [0],
+            color=style.get("color"),
+            marker=style.get("marker"),
+            lw=1.1,
+            ms=3,
+        )
+        legend_handles.append(handle)
+        legend_labels.append(f"tile/bdx={tile}")
+
+    fig.legend(
+        legend_handles,
+        legend_labels,
+        loc="lower center",
+        ncol=9,
+        fontsize=9,
+        frameon=True,
+        bbox_to_anchor=(0.5, 0.02),
+    )
+    fig.suptitle("Decode KV Tile Speedup vs FlashInfer Auto Baseline", fontsize=15)
+    PLOTS_DIR.mkdir(parents=True, exist_ok=True)
+    out = PLOTS_DIR / "all_models_decode_speedup_vs_baseline.png"
+    fig.tight_layout(rect=(0, 0.08, 1, 0.96))
+    fig.savefig(out, dpi=180)
+    plt.close(fig)
+    return out
+
+
+def plot_latency(df: pd.DataFrame, model: str, xscale: str) -> pathlib.Path:
     model_df = df[df["model"] == model].copy()
     fig, ax = plt.subplots(figsize=(10, 6))
 
@@ -185,9 +282,8 @@ def plot_latency(df: pd.DataFrame, model: str) -> pathlib.Path:
     ax.set_title(f"{model} Decode Latency")
     ax.set_xlabel("kv_len")
     ax.set_ylabel("Latency (ms)")
-    ax.set_xscale("log", base=2)
     ax.set_yscale("log")
-    format_kv_axis(ax)
+    format_kv_axis(ax, xscale)
     ax.grid(True, which="both", ls=":", alpha=0.45)
     ax.legend(loc="best", fontsize=8)
 
@@ -199,7 +295,7 @@ def plot_latency(df: pd.DataFrame, model: str) -> pathlib.Path:
     return out
 
 
-def plot_baseline_drift(df: pd.DataFrame, model: str) -> pathlib.Path | None:
+def plot_baseline_drift(df: pd.DataFrame, model: str, xscale: str) -> pathlib.Path | None:
     model_df = df[df["model"] == model].copy()
     before = model_df[model_df["phase"] == "baseline_before"].sort_values("kv_len").set_index("kv_len")["ms"]
     after = model_df[model_df["phase"] == "baseline_after"].sort_values("kv_len").set_index("kv_len")["ms"]
@@ -215,8 +311,7 @@ def plot_baseline_drift(df: pd.DataFrame, model: str) -> pathlib.Path | None:
     ax.set_title(f"{model} Decode Baseline Drift")
     ax.set_xlabel("kv_len")
     ax.set_ylabel("baseline_after_ms / baseline_before_ms")
-    ax.set_xscale("log", base=2)
-    format_kv_axis(ax)
+    format_kv_axis(ax, xscale)
     ax.grid(True, which="both", ls=":", alpha=0.45)
     ax.text(
         0.02,
@@ -241,6 +336,17 @@ def main() -> None:
     parser.add_argument("--csv", type=pathlib.Path, default=CSV_PATH)
     parser.add_argument("--model", default="llama3_8b")
     parser.add_argument(
+        "--all",
+        action="store_true",
+        help="Generate speedup plots for every model and one combined overview figure.",
+    )
+    parser.add_argument(
+        "--xscale",
+        choices=["linear", "log"],
+        default="linear",
+        help="X-axis scale for kv_len. Default is linear because kv_len is swept uniformly.",
+    )
+    parser.add_argument(
         "--baseline",
         choices=["mean", "before", "after"],
         default="mean",
@@ -249,13 +355,25 @@ def main() -> None:
     args = parser.parse_args()
 
     df = load_results(args.csv)
+    available_models = sorted(m for m in df["model"].unique() if m and m != "unknown")
+
+    if args.all:
+        if not available_models:
+            raise SystemExit("no models found in CSV")
+        overview_path = plot_all_model_speedup(df, available_models, args.baseline, args.xscale)
+        print(f"saved: {overview_path}")
+        for model in available_models:
+            speedup_path = plot_speedup(df, model, args.baseline, args.xscale)
+            print(f"saved: {speedup_path}")
+        return
+
     if args.model not in set(df["model"]):
-        available = ", ".join(sorted(df["model"].unique()))
+        available = ", ".join(available_models)
         raise SystemExit(f"model not found: {args.model}. available: {available}")
 
-    speedup_path = plot_speedup(df, args.model, args.baseline)
-    latency_path = plot_latency(df, args.model)
-    drift_path = plot_baseline_drift(df, args.model)
+    speedup_path = plot_speedup(df, args.model, args.baseline, args.xscale)
+    latency_path = plot_latency(df, args.model, args.xscale)
+    drift_path = plot_baseline_drift(df, args.model, args.xscale)
 
     print(f"saved: {speedup_path}")
     print(f"saved: {latency_path}")

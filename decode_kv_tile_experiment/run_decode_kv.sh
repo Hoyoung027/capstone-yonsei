@@ -25,7 +25,7 @@ fi
 
 BATCH_SIZE="${BATCH_SIZE:-8}"
 PAGE_SIZE="${PAGE_SIZE:-16}"
-PYTHON_BIN="${PYTHON_BIN:-/root/venv/bin/python}"
+PYTHON_BIN="${PYTHON_BIN:-/root/capstone-yonsei/venv/bin/python}"
 KV_LENS="${KV_LENS:-$(seq -s ' ' 128 128 8192)}"
 SKIP_CORRECTNESS="${SKIP_CORRECTNESS:-0}"
 export PATH="$(dirname "$PYTHON_BIN"):$PATH"

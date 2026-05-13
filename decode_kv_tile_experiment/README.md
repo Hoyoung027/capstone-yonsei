@@ -78,7 +78,7 @@ bash run_decode_kv.sh gemma2_9b
 bash run_decode_kv.sh gemma2_27b
 ```
 
-기본 실행 스크립트는 `/root/venv/bin/python`을 사용합니다. 다른 Python을 쓰려면:
+기본 실행 스크립트는 `/root/capstone-yonsei/venv/bin/python`을 사용합니다. 다른 Python을 쓰려면:
 
 ```bash
 PYTHON_BIN=/path/to/python bash run_decode_kv.sh
@@ -111,6 +111,32 @@ batch size 변경:
 BATCH_SIZE=16 bash run_decode_kv.sh
 ```
 
+백그라운드에서 전체 decode 실험 실행:
+
+```bash
+mkdir -p results/logs
+nohup bash run_decode_kv.sh > results/logs/run_decode_kv_$(date +%Y%m%d_%H%M%S).log 2>&1 &
+```
+
+특정 모델만 백그라운드에서 실행:
+
+```bash
+mkdir -p results/logs
+nohup bash run_decode_kv.sh llama3_8b > results/logs/run_decode_kv_llama3_8b_$(date +%Y%m%d_%H%M%S).log 2>&1 &
+```
+
+로그 확인:
+
+```bash
+tail -f results/logs/run_decode_kv_YYYYMMDD_HHMMSS.log
+```
+
+가장 최근 로그 확인:
+
+```bash
+tail -f "$(ls -t results/logs/run_decode_kv*.log | head -n 1)"
+```
+
 ## 실험 순서
 
 ```text
@@ -135,19 +161,31 @@ Plot 생성:
 
 ```bash
 cd /root/capstone-yonsei/decode_kv_tile_experiment
-/root/venv/bin/python plot.py
+/root/capstone-yonsei/venv/bin/python plot.py
 ```
 
 다른 모델 plot 생성:
 
 ```bash
-/root/venv/bin/python plot.py --model qwen2.5_7b
+/root/capstone-yonsei/venv/bin/python plot.py --model qwen2.5_7b
+```
+
+CSV에 들어 있는 모든 모델의 speedup plot 생성:
+
+```bash
+/root/capstone-yonsei/venv/bin/python plot.py --all
+```
+
+기본 x축은 `kv_len` 선형 축입니다. 로그 축으로 보고 싶으면:
+
+```bash
+/root/capstone-yonsei/venv/bin/python plot.py --all --xscale log
 ```
 
 필요 패키지가 없다면:
 
 ```bash
-/root/venv/bin/pip install matplotlib pandas
+/root/capstone-yonsei/venv/bin/pip install matplotlib pandas
 ```
 
 생성 파일:
