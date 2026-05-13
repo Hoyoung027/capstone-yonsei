@@ -41,6 +41,12 @@ cd /root/capstone-yonsei/kv_tile_experiment
 bash run_tile_kv.sh
 ```
 
+기본 실행 스크립트는 `/root/capstone-yonsei/venv/bin/python`을 사용합니다. 다른 Python을 쓰려면:
+
+```bash
+PYTHON_BIN=/path/to/python bash run_tile_kv.sh
+```
+
 특정 모델 그룹만 실행할 수도 있습니다.
 
 ```bash
@@ -115,7 +121,7 @@ correctness check 1회
 `patch_prefill.py`는 아래 FlashInfer 헤더를 직접 수정합니다.
 
 ```text
-/root/venv/lib/python3.10/site-packages/flashinfer/data/include/flashinfer/attention/prefill.cuh
+/root/capstone-yonsei/venv/lib/python3.10/site-packages/flashinfer/data/include/flashinfer/attention/prefill.cuh
 ```
 
 `run_tile_kv.sh`에는 종료 시 자동 복원을 위한 trap이 들어 있습니다.
@@ -123,7 +129,7 @@ correctness check 1회
 
 ```bash
 cd /root/capstone-yonsei/kv_tile_experiment
-python patch_prefill.py restore
+/root/capstone-yonsei/venv/bin/python patch_prefill.py restore
 rm -rf /root/.cache/flashinfer/
 ```
 
