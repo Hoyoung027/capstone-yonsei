@@ -1,204 +1,126 @@
-# Capstone Yonsei — LLM 추론 서빙 환경 설정
+# Capstone Yonsei
 
-## 환경 정보
+FlashInfer attention kernel의 tile/scheduler 설정을 바꿔가며 LLM prefill/decode latency를 측정하는 실험 repo입니다.
 
-| 항목 | 내용 |
-|------|------|
-| **Platform** | VESSL Workspace |
-| **GPU** | NVIDIA GeForce RTX 3090 (24GB VRAM) |
-| **CUDA Driver** | 12.4 |
-| **CUDA Toolkit (nvcc)** | 12.1 |
-| **Python** | 3.10.12 |
-| **PyTorch** | 2.5.1+cu121 |
-| **FlashAttention** | 2.8.3 |
-| **FlashInfer** | 0.6.7 |
-
----
-
-## 패키지 설치
-
-> FlashInfer stable wheel이 CUDA 12.6+만 지원하므로 소스 빌드로 진행
-
-### 1. 빌드 도구
+현재 실험은 `/root/capstone-yonsei/venv` 가상환경을 기준으로 실행합니다.
 
 ```bash
-pip install --no-cache-dir wheel ninja packaging psutil cmake
+cd /root/capstone-yonsei
+source venv/bin/activate
 ```
 
-### 2. PyTorch (CUDA 12.1)
+환경 요약:
 
-```bash
-pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cu121
+```text
+GPU             NVIDIA GeForce RTX 3090
+Python          3.10
+PyTorch         2.5.1+cu121
+FlashAttention  2.x
+FlashInfer      source build
 ```
 
-### 3. FlashAttention 2
+## 파일 구조
 
-```bash
-pip install --no-cache-dir flash-attn --no-build-isolation
-```
-
-### 4. FlashInfer (소스 빌드)
-
-```bash
-git clone https://github.com/flashinfer-ai/flashinfer.git --recursive
-cd flashinfer
-pip install --no-cache-dir -v .
-```
-
-> 빌드 시간: ninja 병렬 빌드 기준 30~60분 예상  
-> RAM 부족 시: `MAX_JOBS=4 pip install --no-cache-dir -v .`
-
----
-
-## 설치 확인
-
-### PyTorch + CUDA
-
-```bash
-python -c "
-import torch
-print('torch       :', torch.__version__)
-print('CUDA avail  :', torch.cuda.is_available())
-print('CUDA version:', torch.version.cuda)
-print('GPU         :', torch.cuda.get_device_name(0))
-"
-```
-
-### FlashAttention 2
-
-```bash
-python -c "
-import torch
-import flash_attn
-from flash_attn import flash_attn_func
-
-print('flash_attn version:', flash_attn.__version__)
-
-# 동작 확인
-b, s, h, d = 2, 512, 16, 128
-q = torch.randn(b, s, h, d, device='cuda', dtype=torch.float16)
-k = torch.randn(b, s, h, d, device='cuda', dtype=torch.float16)
-v = torch.randn(b, s, h, d, device='cuda', dtype=torch.float16)
-out = flash_attn_func(q, k, v, causal=True)
-print('flash_attn output shape:', out.shape)
-print('FlashAttention OK')
-"
-```
-
-### FlashInfer
-
-```bash
-python -c "
-import torch
-import flashinfer
-
-print('flashinfer version:', flashinfer.__version__)
-
-# single decode 동작 확인
-q = torch.randn(32, 128, device='cuda', dtype=torch.float16)      # [num_heads, head_dim]
-k = torch.randn(128, 32, 128, device='cuda', dtype=torch.float16) # [kv_len, num_heads, head_dim]
-v = torch.randn(128, 32, 128, device='cuda', dtype=torch.float16)
-out = flashinfer.single_decode_with_kv_cache(q, k, v)
-print('flashinfer output shape:', out.shape)
-print('FlashInfer OK')
-"
-```
-
-### 전체 한 번에 확인
-
-```bash
-python -c "
-import torch, flash_attn, flashinfer
-print(f'torch      {torch.__version__}  CUDA {torch.version.cuda}  GPU: {torch.cuda.get_device_name(0)}')
-print(f'flash_attn {flash_attn.__version__}')
-print(f'flashinfer {flashinfer.__version__}')
-"
-```
-
----
-
-## 실험 스크립트
-
-### 파일 구조
-
-```
+```text
 capstone-yonsei/
-├── inspect_tile_config.py   # FlashInfer 커널 URI / 타일 설정 관찰
-├── bench_attention.py       # FlashAttention vs FlashInfer 성능 벤치마크
-└── results/
-    └── bench_results.csv    # 벤치마크 결과 (실행 후 생성)
+├── README.md
+├── requirements.txt
+├── venv/
+│
+├── prefill_kv_tile_experiment/
+│   ├── README.md
+│   ├── run_tile_kv.sh
+│   ├── test_tile_kv.py
+│   ├── patch_prefill.py
+│   ├── bench_utils.py
+│   ├── plot.py
+│   └── results/
+│
+├── decode_kv_tile_experiment/
+│   ├── README.md
+│   ├── run_decode_kv.sh
+│   ├── test_decode_kv.py
+│   ├── patch_decode.py
+│   ├── bench_utils.py
+│   ├── plot.py
+│   └── results/
+│
+└── decode_tensor_core_experiment/
+    ├── README.md
+    ├── run_decode_tc.sh
+    ├── run_decode_tc_split_sweep.sh
+    ├── smoke_decode_tc.sh
+    ├── test_decode_tc.py
+    ├── patch_decode_tc.py
+    ├── bench_utils.py
+    ├── plot.py
+    └── results/
 ```
 
----
+## 실험 요약
 
-### 1. 커널 선택 / 타일 설정 관찰
+### 1. `prefill_kv_tile_experiment`
 
-`inspect_tile_config.py` — prefill/decode 상황에서 FlashInfer가 어떤 커널을 선택하고 타일 설정이 어떻게 구성되는지 출력한다.
+FlashInfer prefill 경로에서 KV 방향 tensor-core tile 크기를 바꿔보는 실험입니다.
+
+```text
+조작 값: NUM_MMA_KV
+대상: prefill.cuh
+측정: seq_len=128..8192에서 FlashInfer auto baseline vs forced NUM_MMA_KV
+```
+
+### 2. `decode_kv_tile_experiment`
+
+FlashInfer cuda-core decode 경로에서 decode KV tile 크기를 바꿔보는 실험입니다.
+
+```text
+조작 값: tile_size_per_bdx
+대상: decode.cuh, scheduler.cuh
+조건: BatchDecodeWithPagedKVCacheWrapper(use_tensor_cores=False)
+측정: kv_len=128..8192에서 FlashInfer auto baseline vs forced tile_size_per_bdx
+```
+
+### 3. `decode_tensor_core_experiment`
+
+FlashInfer tensor-core decode 경로에서 `NUM_MMA_KV`와 split-k 설정을 함께 바꿔 latency를 측정합니다.
+
+```text
+조건: BatchDecodeWithPagedKVCacheWrapper(use_tensor_cores=True, backend=fa2)
+조작 값 1: NUM_MMA_KV = auto, 1, 2
+조작 값 2: split-k = auto, off, fixed_16, fixed_32, ..., fixed_8192
+대상: prefill.cuh
+측정: llama3_8b, batch=8, page=16, kv_len=128..8192
+```
+
+`use_tensor_cores=True` decode는 내부적으로 FA2 batch prefill kernel을 사용하므로,
+tensor-core decode tile 설정은 `decode.cuh`가 아니라 `prefill.cuh`의 `NUM_MMA_KV` dispatch를 패치합니다.
+
+`NUM_MMA_KV`를 1, 2로 제한하는 이유:
+
+```text
+RTX 3090 / llama3_8b / head_dim=128 조건에서 NUM_MMA_KV=3,4는
+FlashInfer FA2 tensor-core kernel launch가 invalid argument로 실패했습니다.
+정식 sweep에서는 안정적으로 동작하는 NUM_MMA_KV=1,2만 사용합니다.
+```
+
+## 결과 위치
+
+각 실험 디렉터리 아래에 결과가 저장됩니다.
+
+```text
+results/data/
+results/logs/
+results/plots/
+```
+
+## 환경 확인
 
 ```bash
-python inspect_tile_config.py
-```
+cd /root/capstone-yonsei
+source venv/bin/activate
 
-**출력 내용:**
-- GPU SM 버전 및 예상 `CTA_TILE_Q`
-- 각 입력 조합(seq_len, head_dim, dtype)별로 선택된 **커널 URI**
-- JIT 컴파일된 `.inc` 파일에서 파싱한 컴파일 타임 설정 (`HEAD_DIM`, `DType`, `POS_ENCODING_MODE` 등)
-- RTX 3090 (SM 8.6) 기준: prefill `CTA_TILE_Q = 64` (SM≥9이면 128)
-
-**타일 결정 규칙 요약:**
-
-| 시나리오 | 설정 이름 | RTX 3090 값 | 결정 방식 |
-|----------|-----------|-------------|-----------|
-| Prefill  | `CTA_TILE_Q` | 64 | SM < 9 → 64, SM ≥ 9 → 128 |
-| Prefill  | `CTA_TILE_KV` | head_dim 기반 | `NUM_MMA_KV × NUM_WARPS_KV × 16` |
-| Decode   | `tile_size_per_bdx` | 4 | head_dim / (vec_size × bdx) |
-
----
-
-### 2. 성능 벤치마크
-
-`bench_attention.py` — PyTorch SDPA / FlashAttention 2 / FlashInfer를 prefill과 decode 시나리오에서 비교한다.
-
-```bash
-python bench_attention.py
-```
-
-**출력 내용:**
-- 각 입력 조합별 선택된 FlashInfer URI
-- `latency (ms)` / `TFLOPS` / `speedup vs SDPA`
-- FlashInfer vs FlashAttention 2 speedup
-
-**예시 출력:**
-```
-  prefill seq= 2048 hd=128 float16  [CTA_TILE_Q=64]
-  URI : single_prefill_with_kv_cache_...
-  커널          latency(ms)   TFLOPS   speedup vs SDPA
-  ────────────────────────────────────────────────────
-  PyTorch SDPA       x.xxxx    x.xxx            1.00x
-  FlashAttn2         x.xxxx    x.xxx            x.xxx
-  FlashInfer         x.xxxx    x.xxx            x.xxx
-  FlashInfer vs FlashAttn2 speedup: x.xx x
-```
-
-결과는 `results/bench_results.csv`에 저장된다.
-
----
-
-## API 로깅 (상세 디버그)
-
-FlashInfer 실행 흐름을 상세히 보려면 환경 변수로 로깅을 활성화한다.
-
-```bash
-# 레벨: 0=off, 1=기본, 3=상세, 5=통계
-export FLASHINFER_LOGLEVEL=3
-export FLASHINFER_LOGDEST=stdout
-python bench_attention.py
-```
-
----
-
-## GPU 상태 확인
-
-```bash
+python -c 'import torch; print("torch", torch.__version__, "cuda", torch.version.cuda); print("available", torch.cuda.is_available(), "count", torch.cuda.device_count())'
+python -c 'import flash_attn; print("flash_attn ok")'
+python -c 'import flashinfer; print("flashinfer ok")'
 nvidia-smi
 ```
