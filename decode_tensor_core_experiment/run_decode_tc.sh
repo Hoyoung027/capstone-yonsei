@@ -7,6 +7,7 @@
 #   bash run_decode_tc.sh llama3_8b qwen2.5_72b
 #   MMA_KV_VALS="1 2" bash run_decode_tc.sh llama3_8b
 #   LABEL_SUFFIX="split_fixed_512" FIXED_SPLIT_SIZE=512 bash run_decode_tc.sh llama3_8b
+#   DTYPE=bf16 bash run_decode_tc.sh llama3_8b
 #   KV_LENS="128 1024" SKIP_CORRECTNESS=1 bash run_decode_tc.sh llama3_8b
 
 set -e
@@ -26,6 +27,7 @@ fi
 BATCH_SIZE="${BATCH_SIZE:-8}"
 PAGE_SIZE="${PAGE_SIZE:-16}"
 BACKEND="${BACKEND:-fa2}"
+DTYPE="${DTYPE:-float16}"
 PYTHON_BIN="${PYTHON_BIN:-/root/capstone-yonsei/venv/bin/python}"
 KV_LENS="${KV_LENS:-$(seq -s ' ' 128 128 8192)}"
 SKIP_CORRECTNESS="${SKIP_CORRECTNESS:-0}"
@@ -38,8 +40,21 @@ _restore_on_exit() { "$PYTHON_BIN" patch_decode_tc.py restore 2>/dev/null || tru
 trap _restore_on_exit EXIT
 
 clear_flashinfer_cache() {
-    echo "  JIT cache 삭제..."
+    echo "  전처리: JIT cache 삭제"
     rm -rf /root/.cache/flashinfer/
+}
+
+summarize_lens() {
+    local arr=($KV_LENS)
+    local n=${#arr[@]}
+    if [ "$n" -eq 0 ]; then
+        echo "empty"
+    elif [ "$n" -eq 1 ]; then
+        echo "${arr[0]}"
+    else
+        local step=$((arr[1] - arr[0]))
+        echo "${arr[0]}..${arr[$((n - 1))]} step ${step} (${n} values)"
+    fi
 }
 
 run_model() {
@@ -62,7 +77,7 @@ run_model() {
         --label "$label" \
         --num_qo_heads "$qo" --num_kv_heads "$kv" --head_dim "$dim" \
         --batch_size "$BATCH_SIZE" --page_size "$PAGE_SIZE" \
-        --kv_lens "$KV_LENS" --backend "$BACKEND" \
+        --kv_lens "$KV_LENS" --backend "$BACKEND" --dtype "$DTYPE" \
         "${args[@]}"
 }
 
@@ -149,9 +164,10 @@ echo "========================================"
 echo " decode tensor-core KV tile suite: ${TARGETS[*]}"
 echo " order: baseline_before ${MMA_KV_VALS[*]/#/mma} baseline_after"
 echo " batch_size=${BATCH_SIZE} page_size=${PAGE_SIZE} backend=${BACKEND}"
+echo " dtype=${DTYPE}"
 echo " fixed_split_size=${FIXED_SPLIT_SIZE:-none} disable_split_kv=${DISABLE_SPLIT_KV}"
 echo " label_suffix=${LABEL_SUFFIX:-none}"
-echo " kv_lens=${KV_LENS}"
+echo " kv_lens=$(summarize_lens)"
 echo " python=${PYTHON_BIN}"
 echo " skip_correctness=${SKIP_CORRECTNESS}"
 echo " $(date)"

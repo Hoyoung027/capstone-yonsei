@@ -30,7 +30,7 @@ import pandas as pd
 
 
 ROOT = pathlib.Path(__file__).parent
-CSV_PATH = ROOT / "results" / "data" / "decode_tc_results.csv"
+CSV_PATH = ROOT / "results" / "data" / "decode_tc_results_fp16.csv"
 PLOTS_DIR = ROOT / "results" / "plots"
 KV_TICKS = [128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768]
 

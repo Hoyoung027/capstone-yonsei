@@ -3,7 +3,7 @@
 FlashInfer `BatchDecodeWithPagedKVCacheWrapper(use_tensor_cores=True)` 경로에서
 decode latency가 tensor-core tile 설정과 split-k 설정에 따라 어떻게 달라지는지 측정하는 실험입니다.
 
-현재 주 실험은 `llama3_8b` 기준으로 다음 두 축을 함께 sweep합니다.
+현재 주 실험은 여러 모델과 dtype에 대해 다음 두 축을 함께 sweep합니다.
 
 ```text
 1. tensor-core KV tile 크기
@@ -127,7 +127,7 @@ model = llama3_8b
 batch_size = 8
 page_size = 16
 backend = fa2
-dtype = fp16
+dtype = fp16 또는 bf16
 kv_len = 128..8192, step 128
 warmup = 100
 repeat = 100
@@ -150,10 +150,37 @@ cd /root/capstone-yonsei/decode_tensor_core_experiment
 nohup env SPLIT_MODES=study KV_LENS="$(seq -s ' ' 128 128 8192)" bash run_decode_tc_split_sweep.sh llama3_8b > results/logs/run_decode_tc_split_study_llama3_8b_$(date +%Y%m%d_%H%M%S).log 2>&1 &
 ```
 
+모든 dtype/model을 순차 실행:
+
+```bash
+nohup bash run_decode_tc_experience.sh > results/logs/run_decode_tc_experience_$(date +%Y%m%d_%H%M%S).log 2>&1 &
+```
+
+기본 조합:
+
+```text
+DTYPES = fp16, bf16
+MODELS = llama3_8b, llama3_70b, qwen2.5_72b, gemma2_9b, gemma2_27b
+```
+
+일부만 실행:
+
+```bash
+DTYPES="fp16" MODELS="llama3_70b gemma2_27b" bash run_decode_tc_experience.sh
+```
+
+`run_decode_tc_experience.sh`는 dtype/model을 동시에 실행하지 않고 순차 실행합니다.
+성능 측정 간 GPU 간섭을 피하기 위한 방식입니다. 각 dtype/model의 상세 로그는 별도 파일로 저장됩니다.
+
+```text
+results/logs/run_decode_tc_split_study_fp16_llama3_8b_*.log
+results/logs/run_decode_tc_split_study_bf16_llama3_8b_*.log
+```
+
 로그 확인:
 
 ```bash
-tail -f "$(ls -t results/logs/run_decode_tc_split_study*.log | head -n 1)"
+tail -f "$(ls -t results/logs/run_decode_tc_experience*.log | head -n 1)"
 ```
 
 빠른 pilot:
@@ -181,7 +208,8 @@ STOP_ON_ERROR=1 bash run_decode_tc_split_sweep.sh llama3_8b
 CSV:
 
 ```text
-results/data/decode_tc_results.csv
+results/data/decode_tc_results_fp16.csv
+results/data/decode_tc_results_bf16.csv
 ```
 
 주요 컬럼:
@@ -202,8 +230,8 @@ gb_per_s_est       K/V read 기준 bandwidth proxy
 label 예시:
 
 ```text
-[baseline_before] llama3_8b_split_auto
-[experiment] llama3_8b_split_fixed_512_num_mma_kv_2
+[baseline_before] llama3_8b_fp16_split_auto
+[experiment] llama3_8b_fp16_split_fixed_512_num_mma_kv_2
 ```
 
 ## Plot
@@ -214,6 +242,12 @@ split-k별 speedup/latency:
 /root/capstone-yonsei/venv/bin/python plot.py --split --model llama3_8b --mma auto
 /root/capstone-yonsei/venv/bin/python plot.py --split --model llama3_8b --mma 1
 /root/capstone-yonsei/venv/bin/python plot.py --split --model llama3_8b --mma 2
+```
+
+bf16 결과를 그릴 때:
+
+```bash
+/root/capstone-yonsei/venv/bin/python plot.py --csv results/data/decode_tc_results_bf16.csv --split --model llama3_8b --mma 2
 ```
 
 speedup 해석:
@@ -233,6 +267,7 @@ NUM_MMA_KV별 speedup/latency:
 ## 파일 역할
 
 ```text
+run_decode_tc_experience.sh     dtype x model 전체 순차 실행 드라이버
 run_decode_tc_split_sweep.sh  split-k x NUM_MMA_KV 전체 sweep 드라이버
 run_decode_tc.sh              단일 split-k 조건에서 baseline/MMA=1/MMA=2 실행
 test_decode_tc.py             실제 FlashInfer decode benchmark

@@ -14,6 +14,7 @@ Usage:
 """
 
 from pathlib import Path
+import os
 import shutil
 import sys
 
@@ -30,13 +31,19 @@ DISPATCH_TOKEN = "DISPATCH_NUM_MMA_KV("
 ISINVALID_EXPR = (
     "NUM_MMA_Q * (8 * NUM_MMA_D_VO + 2 * sizeof(DTypeQKAccum) * NUM_MMA_KV) >= 256"
 )
+VERBOSE = os.environ.get("PATCH_VERBOSE", "0") == "1"
+
+
+def log_verbose(message: str) -> None:
+    if VERBOSE:
+        print(message)
 
 
 def _find_prefill_cuh() -> Path:
     for attn_dir in ATTN_DIR_CANDIDATES:
         path = attn_dir / "prefill.cuh"
         if path.exists():
-            print(f"  prefill.cuh: {path}")
+            log_verbose(f"  prefill.cuh: {path}")
             return path
     searched = "\n".join(f"  - {p / 'prefill.cuh'}" for p in ATTN_DIR_CANDIDATES)
     raise FileNotFoundError(f"FlashInfer prefill.cuh를 찾지 못했습니다:\n{searched}")
@@ -64,7 +71,7 @@ def _ensure_backup(prefill_cuh: Path) -> None:
     current_dispatch_count = _dispatch_count(current)
     if current_dispatch_count == 3:
         shutil.copy2(prefill_cuh, backup)
-        print(f"  backup refreshed: {backup}")
+        log_verbose(f"  backup refreshed: {backup}")
         return
 
     if not backup.exists():
@@ -72,7 +79,7 @@ def _ensure_backup(prefill_cuh: Path) -> None:
             f"현재 prefill.cuh는 원본 상태가 아닙니다. DISPATCH_NUM_MMA_KV={current_dispatch_count}. "
             "FlashInfer를 복원/재설치한 뒤 다시 실행하세요."
         )
-    print(f"  using existing backup: {backup}")
+    log_verbose(f"  using existing backup: {backup}")
 
 
 def _brace_delta(line: str) -> int:
@@ -111,7 +118,7 @@ def _patch_dispatch_blocks(lines: list[str], num_mma_kv: int) -> tuple[list[str]
         lines.insert(open_idx + 1, f"{open_pad}{{\n")
         lines[close_idx + 1] = f"{close_pad}}}\n"
         patched += 1
-        print(f"  patched DISPATCH_NUM_MMA_KV: lines {open_idx + 1}-{close_idx + 1}")
+        log_verbose(f"  patched DISPATCH_NUM_MMA_KV: lines {open_idx + 1}-{close_idx + 1}")
 
     return lines, patched
 
@@ -123,7 +130,7 @@ def _patch_isinvalid(lines: list[str], num_mma_kv: int) -> None:
     for idx, line in enumerate(lines):
         if ISINVALID_EXPR in line:
             lines[idx] = line.replace(">= 256", ">= 512")
-            print(f"  IsInvalid: line {idx + 1} >= 256 -> >= 512")
+            log_verbose(f"  IsInvalid: line {idx + 1} >= 256 -> >= 512")
             return
     print("  warning: IsInvalid threshold expression not found; skipped")
 
@@ -142,17 +149,17 @@ def apply(num_mma_kv: int) -> None:
     _patch_isinvalid(lines, num_mma_kv)
     lines, patched = _patch_dispatch_blocks(lines, num_mma_kv)
     _write(prefill_cuh, lines)
-    print(f"  NUM_MMA_KV={num_mma_kv} 적용 완료 ({patched} blocks)")
+    print(f"  전처리 완료: NUM_MMA_KV={num_mma_kv} 적용 ({patched} blocks)")
 
 
 def restore() -> None:
     prefill_cuh = _find_prefill_cuh()
     backup = _backup_path(prefill_cuh)
     if not backup.exists():
-        print(f"  backup 없음, skip: {backup}")
+        log_verbose(f"  backup 없음, skip: {backup}")
         return
     shutil.copy2(backup, prefill_cuh)
-    print(f"  원본 복원 완료: {prefill_cuh}")
+    print("  후처리 완료: FlashInfer prefill.cuh 원본 복원")
 
 
 if __name__ == "__main__":

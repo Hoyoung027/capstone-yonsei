@@ -2,7 +2,21 @@
 # Sweep split-k settings for tensor-core decode NUM_MMA_KV experiments.
 # 
 # 실험 동작
-# nohup env SPLIT_MODES=study KV_LENS="$(seq -s ' ' 128 128 8192)" bash run_decode_tc_split_sweep.sh llama3_8b > results/logs/run_decode_tc_split_study_llama3_8b_$(date +%Y%m%d_%H%M%S).log 2>&1 &
+# 모델명을 인자로 넘겨 실행합니다. 인자를 생략하면 llama3_8b를 실행합니다.
+#
+# 지원 모델:
+#   llama3_8b llama3_70b qwen2.5_72b gemma2_9b gemma2_27b
+#   llama qwen gemma  # 모델 그룹
+#
+# 실행 예:
+#   bash run_decode_tc_split_sweep.sh llama3_8b
+#   bash run_decode_tc_split_sweep.sh llama3_70b
+#   MODEL=gemma2_27b bash run_decode_tc_split_sweep.sh
+#   DTYPE=bf16 bash run_decode_tc_split_sweep.sh llama3_8b
+#
+# 정식 study 실행:
+#   nohup env SPLIT_MODES=study KV_LENS="$(seq -s ' ' 128 128 8192)" bash run_decode_tc_split_sweep.sh llama3_8b > results/logs/run_decode_tc_split_study_llama3_8b_$(date +%Y%m%d_%H%M%S).log 2>&1 &
+#   nohup env SPLIT_MODES=study KV_LENS="$(seq -s ' ' 128 128 8192)" bash run_decode_tc_split_sweep.sh llama3_70b > results/logs/run_decode_tc_split_study_llama3_70b_$(date +%Y%m%d_%H%M%S).log 2>&1 &
 
 # 실험 조합
 # split_auto    + MMA auto, 1, 2
@@ -18,9 +32,26 @@
 # fixed_4096    + MMA auto, 1, 2
 # fixed_8192    + MMA auto, 1, 2
 
+# 가능한 모델
+# llama3_8b     q_heads=32  kv_heads=8   group=4  head_dim=128
+# llama3_70b    q_heads=64  kv_heads=8   group=8  head_dim=128
+# qwen2.5_72b   q_heads=64  kv_heads=8   group=8  head_dim=128
+# gemma2_9b     q_heads=16  kv_heads=8   group=2  head_dim=256
+# gemma2_27b    q_heads=32  kv_heads=16  group=2  head_dim=128
+#
+# 그룹 실행
+# llama         llama3_8b + llama3_70b
+# qwen          qwen2.5_72b
+# gemma         gemma2_9b + gemma2_27b
+#
+# decode 미지원 preset
+# llama3_405b   group=16
+# qwen2.5_7b    group=7
+
 #
 # Usage:
 #   bash run_decode_tc_split_sweep.sh llama3_8b
+#   MODEL=llama3_70b bash run_decode_tc_split_sweep.sh
 #   SPLIT_MODES="auto off fixed_256 fixed_512 fixed_1024 fixed_2048" bash run_decode_tc_split_sweep.sh llama3_8b
 #   SPLIT_MODES=full bash run_decode_tc_split_sweep.sh llama3_8b
 #   SPLIT_MODES=all KV_LENS="$(seq -s ' ' 128 128 8192)" bash run_decode_tc_split_sweep.sh llama3_8b
@@ -40,7 +71,11 @@ cd "$(dirname "$0")"
 
 TARGETS=("$@")
 if [ ${#TARGETS[@]} -eq 0 ]; then
-    TARGETS=(llama3_8b)
+    if [ -n "${MODEL:-}" ]; then
+        read -r -a TARGETS <<< "$MODEL"
+    else
+        TARGETS=(llama3_8b)
+    fi
 fi
 
 case "${SPLIT_MODES:-pilot}" in
@@ -60,21 +95,36 @@ case "${SPLIT_MODES:-pilot}" in
 esac
 
 MMA_KV_VALS="${MMA_KV_VALS:-1 2}"
+DTYPE="${DTYPE:-float16}"
 PYTHON_BIN="${PYTHON_BIN:-/root/capstone-yonsei/venv/bin/python}"
 KV_LENS="${KV_LENS:-128 512 1024 2048 4096 8192}"
 SKIP_CORRECTNESS="${SKIP_CORRECTNESS:-1}"
 STOP_ON_ERROR="${STOP_ON_ERROR:-0}"
 
-export MMA_KV_VALS PYTHON_BIN KV_LENS SKIP_CORRECTNESS
+export MMA_KV_VALS DTYPE PYTHON_BIN KV_LENS SKIP_CORRECTNESS
 
 mkdir -p results/logs results/data results/plots
+
+summarize_lens() {
+    local arr=($KV_LENS)
+    local n=${#arr[@]}
+    if [ "$n" -eq 0 ]; then
+        echo "empty"
+    elif [ "$n" -eq 1 ]; then
+        echo "${arr[0]}"
+    else
+        local step=$((arr[1] - arr[0]))
+        echo "${arr[0]}..${arr[$((n - 1))]} step ${step} (${n} values)"
+    fi
+}
 
 echo "========================================"
 echo " decode tensor-core split-k sweep"
 echo " targets=${TARGETS[*]}"
 echo " split_modes=${SPLIT_MODES}"
 echo " mma_kv_vals=${MMA_KV_VALS}"
-echo " kv_lens=${KV_LENS}"
+echo " dtype=${DTYPE}"
+echo " kv_lens=$(summarize_lens)"
 echo " skip_correctness=${SKIP_CORRECTNESS}"
 echo " stop_on_error=${STOP_ON_ERROR}"
 echo " python=${PYTHON_BIN}"
@@ -93,10 +143,10 @@ for mode in $SPLIT_MODES; do
 
     case "$mode" in
         auto)
-            export LABEL_SUFFIX="split_auto"
+            export LABEL_SUFFIX="${DTYPE}_split_auto"
             ;;
         off|disable|disabled)
-            export LABEL_SUFFIX="split_off"
+            export LABEL_SUFFIX="${DTYPE}_split_off"
             export DISABLE_SPLIT_KV=1
             ;;
         fixed_*)
@@ -105,7 +155,7 @@ for mode in $SPLIT_MODES; do
                 echo "잘못된 split mode: ${mode}"
                 exit 1
             fi
-            export LABEL_SUFFIX="split_fixed_${size}"
+            export LABEL_SUFFIX="${DTYPE}_split_fixed_${size}"
             export FIXED_SPLIT_SIZE="$size"
             ;;
         *)

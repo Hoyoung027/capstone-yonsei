@@ -5,7 +5,7 @@ FlashInfer batch decode with use_tensor_cores=True internally uses the FA2 batch
 prefill module. This benchmark measures decode latency while patching the FA2
 KernelTraits NUM_MMA_KV value in prefill.cuh.
 
-Results are written to results/data/decode_tc_results.csv.
+Results are written to dtype-specific CSV files under results/data/.
 """
 
 import argparse
@@ -32,11 +32,35 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 DEFAULT_KV_LENS = list(range(128, 8193, 128))
 DEVICE = "cuda"
-DTYPE = torch.float16
 SEP = "=" * 120
 
 
-def make_paged_kv(seq_lens, num_kv_heads, head_dim, page_size):
+def parse_dtype(dtype_name):
+    if dtype_name in {"float16", "fp16", "half"}:
+        return torch.float16
+    if dtype_name in {"bfloat16", "bf16"}:
+        return torch.bfloat16
+    raise ValueError(f"Unsupported dtype: {dtype_name}")
+
+
+def dtype_label(dtype):
+    if dtype is torch.float16:
+        return "fp16"
+    if dtype is torch.bfloat16:
+        return "bf16"
+    return str(dtype)
+
+
+def dtype_csv_suffix(dtype):
+    label = dtype_label(dtype)
+    if label == "fp16":
+        return "fp16"
+    if label == "bf16":
+        return "bf16"
+    return label.replace(".", "_").replace(":", "_")
+
+
+def make_paged_kv(seq_lens, num_kv_heads, head_dim, page_size, dtype):
     pages_per_seq = [(s + page_size - 1) // page_size for s in seq_lens]
     total_pages = sum(pages_per_seq)
 
@@ -46,7 +70,7 @@ def make_paged_kv(seq_lens, num_kv_heads, head_dim, page_size):
         page_size,
         num_kv_heads,
         head_dim,
-        dtype=DTYPE,
+        dtype=dtype,
         device=DEVICE,
     )
 
@@ -160,17 +184,31 @@ def parse_optional_int(text):
     return int(text)
 
 
+def summarize_int_list(values):
+    if not values:
+        return "empty"
+    if len(values) == 1:
+        return str(values[0])
+    step = values[1] - values[0]
+    is_regular = all(values[i] - values[i - 1] == step for i in range(1, len(values)))
+    if is_regular:
+        return f"{values[0]}..{values[-1]} step {step} ({len(values)} values)"
+    preview = " ".join(map(str, values[:8]))
+    suffix = " ..." if len(values) > 8 else ""
+    return f"{preview}{suffix} ({len(values)} values)"
+
+
 def run(label, num_qo_heads, num_kv_heads, head_dim, batch_size, page_size, kv_lens,
-        backend, fixed_split_size=None, disable_split_kv=False, skip_correctness=False):
+        backend, dtype, fixed_split_size=None, disable_split_kv=False, skip_correctness=False):
     print(SEP)
     print(f"  label={label}")
     props = torch.cuda.get_device_properties(0)
     print(f"  GPU: {props.name}  SM{props.major}.{props.minor}")
     print(f"  batch={batch_size}  heads={num_qo_heads}/{num_kv_heads}  "
-          f"dim={head_dim}  page={page_size}  dtype=fp16")
+          f"dim={head_dim}  page={page_size}  dtype={dtype_label(dtype)}")
     print(f"  wrapper: BatchDecodeWithPagedKVCacheWrapper(use_tensor_cores=True, backend={backend})")
     print(f"  fixed_split_size={fixed_split_size}  disable_split_kv={disable_split_kv}")
-    print(f"  kv_len: {kv_lens}")
+    print(f"  kv_len: {summarize_int_list(kv_lens)}")
     print(SEP)
 
     print(f"\n  {'kv_len':>8}  {'CTA_Q':>6}  {'CTA_KV':>7}  {'MMA_KV':>7}  "
@@ -180,9 +218,9 @@ def run(label, num_qo_heads, num_kv_heads, head_dim, batch_size, page_size, kv_l
     rows = []
     for kv_len in kv_lens:
         seq_lens = [kv_len] * batch_size
-        q = torch.randn(batch_size, num_qo_heads, head_dim, dtype=DTYPE, device=DEVICE)
+        q = torch.randn(batch_size, num_qo_heads, head_dim, dtype=dtype, device=DEVICE)
         kv_cache, kv_indptr, kv_indices, kv_last = make_paged_kv(
-            seq_lens, num_kv_heads, head_dim, page_size
+            seq_lens, num_kv_heads, head_dim, page_size, dtype
         )
         wrapper = make_wrapper(
             kv_indptr,
@@ -227,6 +265,7 @@ def run(label, num_qo_heads, num_kv_heads, head_dim, batch_size, page_size, kv_l
             "num_kv_heads": num_kv_heads,
             "head_dim": head_dim,
             "page_size": page_size,
+            "dtype": dtype_label(dtype),
             "use_tensor_cores": 1,
             "backend": backend,
             "fixed_split_size": "" if fixed_split_size is None else fixed_split_size,
@@ -240,8 +279,8 @@ def run(label, num_qo_heads, num_kv_heads, head_dim, batch_size, page_size, kv_l
     return rows
 
 
-def save_csv(rows):
-    csv_path = DATA_DIR / "decode_tc_results.csv"
+def save_csv(rows, dtype):
+    csv_path = DATA_DIR / f"decode_tc_results_{dtype_csv_suffix(dtype)}.csv"
 
     existing = []
     existing_fieldnames = []
@@ -275,6 +314,11 @@ if __name__ == "__main__":
     parser.add_argument("--batch_size", type=int, default=8)
     parser.add_argument("--page_size", type=int, default=16)
     parser.add_argument("--backend", type=str, default="fa2")
+    parser.add_argument(
+        "--dtype",
+        choices=["float16", "fp16", "bfloat16", "bf16"],
+        default=os.environ.get("DTYPE", "float16"),
+    )
     parser.add_argument("--fixed_split_size", type=str, default=None)
     parser.add_argument("--disable_split_kv", action="store_true")
     parser.add_argument(
@@ -295,9 +339,10 @@ if __name__ == "__main__":
         page_size=args.page_size,
         kv_lens=parse_int_list(args.kv_lens),
         backend=args.backend,
+        dtype=parse_dtype(args.dtype),
         fixed_split_size=parse_optional_int(args.fixed_split_size),
         disable_split_kv=args.disable_split_kv,
         skip_correctness=args.skip_correctness,
     )
-    save_csv(rows)
+    save_csv(rows, parse_dtype(args.dtype))
     print(SEP)
