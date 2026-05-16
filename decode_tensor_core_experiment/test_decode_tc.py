@@ -218,6 +218,50 @@ def summarize_int_list(values):
     return f"{preview}{suffix} ({len(values)} values)"
 
 
+def get_split_kv_plan_info(wrapper, kv_len, page_size):
+    # FlashInfer does not expose this via a public API. For the current FA2
+    # tensor-core decode path, _plan_info follows PrefillPlanInfo::ToVector():
+    #   [9]  = kv_chunk_size_ptr_offset in _int_workspace_buffer
+    #   [14] = split_kv flag
+    # The stored kv_chunk_size has already been multiplied by page_size, so it is
+    # token-based. Keep this isolated so version drift is easy to handle.
+    try:
+        plan_info = getattr(wrapper, "_plan_info")
+        int_workspace = getattr(wrapper, "_int_workspace_buffer")
+        kv_chunk_size_ptr_offset = int(plan_info[9])
+        split_kv = bool(plan_info[14])
+        kv_chunk_size_tokens = (
+            int_workspace[kv_chunk_size_ptr_offset:kv_chunk_size_ptr_offset + 4]
+            .view(torch.int32)
+            .cpu()
+            .item()
+        )
+        kv_chunk_size_pages = (
+            kv_chunk_size_tokens // page_size
+            if kv_chunk_size_tokens > 0 and kv_chunk_size_tokens % page_size == 0
+            else ""
+        )
+        num_chunks_kv = (
+            math.ceil(kv_len / kv_chunk_size_tokens)
+            if kv_chunk_size_tokens > 0
+            else ""
+        )
+        return {
+            "split_kv": int(split_kv),
+            "kv_chunk_size_tokens": kv_chunk_size_tokens,
+            "kv_chunk_size_pages": kv_chunk_size_pages,
+            "num_chunks_kv": num_chunks_kv,
+        }
+    except Exception as exc:
+        return {
+            "split_kv": "",
+            "kv_chunk_size_tokens": "",
+            "kv_chunk_size_pages": "",
+            "num_chunks_kv": "",
+            "split_kv_plan_error": type(exc).__name__,
+        }
+
+
 def run(label, num_qo_heads, num_kv_heads, head_dim, batch_size, page_size, kv_lens,
         backend, dtype, fixed_split_size=None, disable_split_kv=False, skip_correctness=False):
     print(SEP)
@@ -232,8 +276,9 @@ def run(label, num_qo_heads, num_kv_heads, head_dim, batch_size, page_size, kv_l
     print(SEP)
 
     print(f"\n  {'kv_len':>8}  {'CTA_Q':>6}  {'CTA_KV':>7}  {'MMA_KV':>7}  "
-          f"{'WRP_KV':>7}  {'ms':>8}  {'TFLOPS':>8}  {'GB/s est':>9}  correctness")
-    print(f"  {'-'*120}")
+          f"{'WRP_KV':>7}  {'split':>5}  {'chunk_tok':>9}  {'chunks':>6}  "
+          f"{'ms':>8}  {'TFLOPS':>8}  {'GB/s est':>9}  correctness")
+    print(f"  {'-'*140}")
 
     rows = []
     for kv_len in kv_lens:
@@ -256,6 +301,8 @@ def run(label, num_qo_heads, num_kv_heads, head_dim, batch_size, page_size, kv_l
             fixed_split_size,
             disable_split_kv,
         )
+
+        split_plan = get_split_kv_plan_info(wrapper, kv_len, page_size)
 
         # bench_utils는 FlashInfer JIT/kernel name에서 실제 template tile 값을 추출한다.
         # patch_decode_tc.py로 NUM_MMA_KV를 강제했는지 확인하는 관측 지점이다.
@@ -283,8 +330,13 @@ def run(label, num_qo_heads, num_kv_heads, head_dim, batch_size, page_size, kv_l
         mma_kv = tile.get("NUM_MMA_KV", "?")
         wrp_kv = tile.get("NUM_WARPS_KV", "?")
 
+        split_kv = split_plan.get("split_kv", "")
+        chunk_tok = split_plan.get("kv_chunk_size_tokens", "")
+        chunks = split_plan.get("num_chunks_kv", "")
+
         print(f"  {kv_len:>8}  {str(cta_q):>6}  {str(cta_kv):>7}  {str(mma_kv):>7}  "
-              f"{str(wrp_kv):>7}  {ms:>8.4f}  {tf:>8.3f}  {gbps:>9.1f}  {corr}")
+              f"{str(wrp_kv):>7}  {str(split_kv):>5}  {str(chunk_tok):>9}  {str(chunks):>6}  "
+              f"{ms:>8.4f}  {tf:>8.3f}  {gbps:>9.1f}  {corr}")
 
         rows.append({
             "label": label,
@@ -299,6 +351,7 @@ def run(label, num_qo_heads, num_kv_heads, head_dim, batch_size, page_size, kv_l
             "backend": backend,
             "fixed_split_size": "" if fixed_split_size is None else fixed_split_size,
             "disable_split_kv": int(disable_split_kv),
+            **split_plan,
             **{k: str(v) for k, v in tile.items()},
             "ms": round(ms, 5),
             "tflops": round(tf, 3),

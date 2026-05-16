@@ -124,3 +124,47 @@ python -c 'import flash_attn; print("flash_attn ok")'
 python -c 'import flashinfer; print("flashinfer ok")'
 nvidia-smi
 ```
+
+## 가상환경 구성
+
+현재 실험은 `/root/capstone-yonsei/venv` 가상환경을 기준으로 실행합니다. 새로 구성할 때는 아래 순서를 권장합니다.
+
+```bash
+python -m venv venv
+source venv/bin/activate
+
+python -m pip install -U pip setuptools wheel
+pip install torch==2.5.1+cu121 \
+  --extra-index-url https://download.pytorch.org/whl/cu121
+pip install ninja cmake packaging psutil einops tqdm tabulate matplotlib pandas
+```
+
+FlashAttention 설치
+
+```bash
+pip install flash_attn==2.8.3 --no-build-isolation
+```
+
+FlashInfer 설치
+
+```bash
+cd /root/flashinfer
+git submodule update --init --recursive
+
+cd /root/capstone-yonsei
+pip install -v /root/flashinfer
+```
+
+설치 확인:
+
+```bash
+cd /root/capstone-yonsei
+source venv/bin/activate
+
+python -c 'import torch; print(torch.__version__, torch.version.cuda, torch.cuda.is_available())'
+python -c 'import flash_attn; print("flash_attn ok")'
+python -c 'import flashinfer; print("flashinfer ok")'
+python -c 'import ninja; print("ninja ok")'
+nvidia-smi
+```
+

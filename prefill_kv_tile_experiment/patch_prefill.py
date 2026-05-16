@@ -17,10 +17,12 @@ import shutil
 import sys
 
 
-PREFILL_CUH = Path(
-    "/root/venv/lib/python3.10/site-packages/flashinfer/data/include/flashinfer/attention/prefill.cuh"
-)
-BACKUP = PREFILL_CUH.with_suffix(PREFILL_CUH.suffix + ".orig")
+ATTN_DIR_CANDIDATES = [
+    Path("/root/capstone-yonsei/venv/lib/python3.10/site-packages/flashinfer/data/include/flashinfer/attention"),
+    Path("/root/venv/lib/python3.10/site-packages/flashinfer/data/include/flashinfer/attention"),
+    Path("/root/flashinfer/flashinfer/data/include/flashinfer/attention"),
+    Path("/root/flashinfer/build/lib/flashinfer/data/include/flashinfer/attention"),
+]
 
 VALID_NUM_MMA_KV = {1, 2, 3, 4, 5, 6, 7, 8}
 DISPATCH_TOKEN = "DISPATCH_NUM_MMA_KV("
@@ -37,6 +39,20 @@ def _write(path: Path, lines: list[str]) -> None:
     path.write_text("".join(lines))
 
 
+def _find_prefill_cuh() -> Path:
+    for attn_dir in ATTN_DIR_CANDIDATES:
+        path = attn_dir / "prefill.cuh"
+        if path.exists():
+            print(f"  prefill.cuh: {path}")
+            return path
+    searched = "\n".join(f"  - {p / 'prefill.cuh'}" for p in ATTN_DIR_CANDIDATES)
+    raise FileNotFoundError(f"FlashInfer prefill.cuh를 찾지 못했습니다:\n{searched}")
+
+
+def _backup_path(path: Path) -> Path:
+    return path.with_suffix(path.suffix + ".orig")
+
+
 def _has_dispatch(lines: list[str]) -> bool:
     return any(DISPATCH_TOKEN in line for line in lines)
 
@@ -45,24 +61,26 @@ def _dispatch_count(lines: list[str]) -> int:
     return sum(1 for line in lines if DISPATCH_TOKEN in line)
 
 
-def _ensure_backup() -> None:
-    if not PREFILL_CUH.exists():
-        raise FileNotFoundError(f"prefill.cuh 없음: {PREFILL_CUH}")
+def _ensure_backup(prefill_cuh: Path) -> Path:
+    if not prefill_cuh.exists():
+        raise FileNotFoundError(f"prefill.cuh 없음: {prefill_cuh}")
 
-    current = _read(PREFILL_CUH)
+    backup = _backup_path(prefill_cuh)
+    current = _read(prefill_cuh)
     current_dispatch_count = _dispatch_count(current)
     if current_dispatch_count == 3:
-        shutil.copy2(PREFILL_CUH, BACKUP)
-        print(f"  backup refreshed: {BACKUP}")
-        return
+        shutil.copy2(prefill_cuh, backup)
+        print(f"  backup refreshed: {backup}")
+        return backup
 
-    if not BACKUP.exists():
+    if not backup.exists():
         raise RuntimeError(
             f"현재 prefill.cuh는 원본 상태가 아닙니다. DISPATCH_NUM_MMA_KV={current_dispatch_count}. "
             "flashinfer를 재설치한 뒤 다시 실행하세요."
         )
 
-    print(f"  using existing backup: {BACKUP}")
+    print(f"  using existing backup: {backup}")
+    return backup
 
 
 def _brace_delta(line: str) -> int:
@@ -128,23 +146,26 @@ def apply(num_mma_kv: int) -> None:
     if num_mma_kv not in VALID_NUM_MMA_KV:
         raise ValueError(f"NUM_MMA_KV는 {sorted(VALID_NUM_MMA_KV)} 중 하나여야 합니다.")
 
-    _ensure_backup()
-    lines = _read(BACKUP)
+    prefill_cuh = _find_prefill_cuh()
+    backup = _ensure_backup(prefill_cuh)
+    lines = _read(backup)
     if not _has_dispatch(lines):
-        raise RuntimeError(f"백업 파일에 DISPATCH_NUM_MMA_KV가 없습니다: {BACKUP}")
+        raise RuntimeError(f"백업 파일에 DISPATCH_NUM_MMA_KV가 없습니다: {backup}")
 
     _patch_isinvalid(lines, num_mma_kv)
     lines, patched = _patch_dispatch_blocks(lines, num_mma_kv)
-    _write(PREFILL_CUH, lines)
+    _write(prefill_cuh, lines)
     print(f"  NUM_MMA_KV={num_mma_kv} 적용 완료 ({patched} blocks)")
 
 
 def restore() -> None:
-    if not BACKUP.exists():
+    prefill_cuh = _find_prefill_cuh()
+    backup = _backup_path(prefill_cuh)
+    if not backup.exists():
         print("  백업 파일 없음. flashinfer 재설치 후 apply를 먼저 실행하세요.")
         return
-    shutil.copy2(BACKUP, PREFILL_CUH)
-    print(f"  원본 복원 완료: {PREFILL_CUH}")
+    shutil.copy2(backup, prefill_cuh)
+    print(f"  원본 복원 완료: {prefill_cuh}")
 
 
 if __name__ == "__main__":
