@@ -61,9 +61,14 @@ def dtype_csv_suffix(dtype):
 
 
 def make_paged_kv(seq_lens, num_kv_heads, head_dim, page_size, dtype):
+    # FlashInfer decode wrapper는 contiguous dense KV가 아니라 paged KV cache를 받는다.
+    # 각 batch sequence를 page_size 단위로 쪼개고, 마지막 page에 실제 토큰이 몇 개
+    # 들어있는지 kv_last에 기록한다.
     pages_per_seq = [(s + page_size - 1) // page_size for s in seq_lens]
     total_pages = sum(pages_per_seq)
 
+    # Layout: [num_pages, K/V=2, page_size, num_kv_heads, head_dim].
+    # wrapper 생성 시 "NHD"를 넘기므로 page 내부 토큰 layout은 N,H,D 순서다.
     paged_kv_cache = torch.randn(
         total_pages,
         2,
@@ -79,6 +84,9 @@ def make_paged_kv(seq_lens, num_kv_heads, head_dim, page_size, dtype):
     last_page_len = []
     page_offset = 0
     for i, (seq_len, n_pages) in enumerate(zip(seq_lens, pages_per_seq)):
+        # indptr[b]: b번째 sequence가 사용하는 page index 범위의 시작점.
+        # indices_list에는 실제 page id를 순서대로 넣는다. 여기서는 실험용이라
+        # 각 sequence에 연속 page를 할당하지만, wrapper API는 임의 page 순서도 지원한다.
         indptr[i + 1] = indptr[i] + n_pages
         indices_list.extend(range(page_offset, page_offset + n_pages))
         last_page_len.append(seq_len - (n_pages - 1) * page_size)
@@ -94,6 +102,8 @@ def make_paged_kv(seq_lens, num_kv_heads, head_dim, page_size, dtype):
 
 def make_wrapper(kv_indptr, kv_indices, kv_last, num_qo_heads, num_kv_heads, head_dim,
                  page_size, backend, fixed_split_size=None, disable_split_kv=False):
+    # FlashInfer가 plan/run 중 임시 버퍼로 쓰는 workspace.
+    # split-k를 켜면 partial states와 merge에도 이 공간이 사용된다.
     workspace = torch.empty(128 * 1024 * 1024, dtype=torch.uint8, device=DEVICE)
     wrapper = flashinfer.BatchDecodeWithPagedKVCacheWrapper(
         workspace,
@@ -101,6 +111,8 @@ def make_wrapper(kv_indptr, kv_indices, kv_last, num_qo_heads, num_kv_heads, hea
         use_tensor_cores=True,
         backend=backend,
     )
+    # plan()에서 paged KV 구조, head shape, page size, split-k 정책을 넘기면
+    # FlashInfer가 내부 scheduler metadata와 JIT kernel 선택 정보를 준비한다.
     wrapper.plan(
         kv_indptr,
         kv_indices,
@@ -117,6 +129,8 @@ def make_wrapper(kv_indptr, kv_indices, kv_last, num_qo_heads, num_kv_heads, hea
 
 
 def reconstruct_dense_kv(kv_cache, kv_indptr, kv_indices, kv_last, seq_lens, page_size):
+    # correctness check용 helper. FlashInfer 입력인 paged KV를 PyTorch reference가
+    # 다루기 쉬운 dense [batch, seq, kv_head, head_dim] 형태로 되돌린다.
     batch_size = len(seq_lens)
     max_seq_len = max(seq_lens)
     num_kv_heads = kv_cache.shape[3]
@@ -148,6 +162,9 @@ def reconstruct_dense_kv(kv_cache, kv_indptr, kv_indices, kv_last, seq_lens, pag
 
 @torch.no_grad()
 def decode_reference(q, kv_cache, kv_indptr, kv_indices, kv_last, seq_lens, page_size):
+    # Tensor-core decode 결과를 검증하기 위한 단순 PyTorch attention.
+    # q shape: [batch, num_qo_heads, head_dim]
+    # k/v shape after reconstruct: [batch, kv_len, num_kv_heads, head_dim]
     k, v = reconstruct_dense_kv(kv_cache, kv_indptr, kv_indices, kv_last, seq_lens, page_size)
     group_size = q.shape[1] // k.shape[2]
 
@@ -155,6 +172,8 @@ def decode_reference(q, kv_cache, kv_indptr, kv_indices, kv_last, seq_lens, page
     out = torch.empty_like(qf)
     scale = 1.0 / math.sqrt(q.shape[-1])
     for kv_head in range(k.shape[2]):
+        # GQA에서는 하나의 KV head가 여러 QO head를 담당한다.
+        # kv_head별로 대응되는 Q head group을 골라 attention을 계산한다.
         head_begin = kv_head * group_size
         head_end = head_begin + group_size
         q_group = qf[:, head_begin:head_end]
@@ -167,6 +186,7 @@ def decode_reference(q, kv_cache, kv_indptr, kv_indices, kv_last, seq_lens, page
 
 
 def correctness_check(q, kv_cache, kv_indptr, kv_indices, kv_last, seq_lens, page_size, out_fi):
+    # benchmark 시간을 오염시키지 않도록 timing 이후에 별도 run 결과를 받아 비교한다.
     out_ref = decode_reference(q, kv_cache, kv_indptr, kv_indices, kv_last, seq_lens, page_size)
     max_err = (out_fi - out_ref).abs().max().item()
     mean_err = (out_fi - out_ref).abs().mean().item()
@@ -217,6 +237,8 @@ def run(label, num_qo_heads, num_kv_heads, head_dim, batch_size, page_size, kv_l
 
     rows = []
     for kv_len in kv_lens:
+        # Decode phase를 모델링하므로 query는 batch마다 1 token이고,
+        # KV cache length만 kv_len으로 늘려가며 측정한다.
         seq_lens = [kv_len] * batch_size
         q = torch.randn(batch_size, num_qo_heads, head_dim, dtype=dtype, device=DEVICE)
         kv_cache, kv_indptr, kv_indices, kv_last = make_paged_kv(
@@ -235,8 +257,15 @@ def run(label, num_qo_heads, num_kv_heads, head_dim, batch_size, page_size, kv_l
             disable_split_kv,
         )
 
+        # bench_utils는 FlashInfer JIT/kernel name에서 실제 template tile 값을 추출한다.
+        # patch_decode_tc.py로 NUM_MMA_KV를 강제했는지 확인하는 관측 지점이다.
         tile = get_tensor_core_decode_tile_params(lambda: wrapper.run(q, kv_cache))
+
+        # CUDA event 기반 warmup/repeat 측정. 정확도 검증은 timed region에 넣지 않는다.
         ms = bench_ms(lambda: wrapper.run(q, kv_cache))
+
+        # TFLOPS와 GB/s는 실험 간 상대 비교용 proxy다. Decode는 긴 KV read가 중요하므로
+        # K/V read bandwidth 추정치도 같이 저장한다.
         flops = decode_flops(batch_size, kv_len, num_qo_heads, head_dim)
         tf = tflops(flops, ms)
         gb = estimated_kv_gb(batch_size, kv_len, num_kv_heads, head_dim, dtype_bytes=2)
@@ -282,6 +311,8 @@ def run(label, num_qo_heads, num_kv_heads, head_dim, batch_size, page_size, kv_l
 def save_csv(rows, dtype):
     csv_path = DATA_DIR / f"decode_tc_results_{dtype_csv_suffix(dtype)}.csv"
 
+    # 같은 label을 다시 실행하면 기존 rows를 교체한다.
+    # sweep을 중간부터 재실행해도 CSV에 중복 label이 쌓이지 않게 하기 위함이다.
     existing = []
     existing_fieldnames = []
     if csv_path.exists():
