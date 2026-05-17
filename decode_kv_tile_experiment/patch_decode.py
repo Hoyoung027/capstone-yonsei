@@ -18,6 +18,7 @@ import sys
 
 
 ATTN_DIR_CANDIDATES = [
+    Path("/root/capstone-yonsei/venv/lib/python3.10/site-packages/flashinfer/data/include/flashinfer/attention"),
     Path("/root/venv/lib/python3.10/site-packages/flashinfer/data/include/flashinfer/attention"),
     Path("/root/flashinfer/flashinfer/data/include/flashinfer/attention"),
     Path("/root/flashinfer/build/lib/flashinfer/data/include/flashinfer/attention"),

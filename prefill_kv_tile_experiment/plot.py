@@ -38,12 +38,15 @@ MMA_STYLES = {
     8: dict(color="#c0392b", marker="D"),
 }
     
-SEQ_TICKS = [128, 256, 512, 1024, 2048, 4096, 8192]
+SEQ_TICKS = [128, 512, 1024, 2048, 4096, 8192]
 
 
-def format_seq_axis(ax) -> None:
-    ax.set_xticks(SEQ_TICKS)
+def format_seq_axis(ax, max_seq_len: int) -> None:
+    ax.set_xscale("linear")
+    ax.set_xlim(left=0, right=max_seq_len + 256)
+    ax.set_xticks([tick for tick in SEQ_TICKS if tick <= max_seq_len])
     ax.xaxis.set_major_formatter(ticker.FuncFormatter(lambda x, _: f"{int(x)}"))
+    ax.xaxis.set_minor_locator(ticker.MultipleLocator(128))
     ax.xaxis.set_minor_formatter(ticker.NullFormatter())
 
 
@@ -94,6 +97,7 @@ def plot_speedup(df: pd.DataFrame, model: str, baseline_mode: str) -> pathlib.Pa
     model_df = df[df["model"] == model].copy()
     base = baseline_series(model_df, baseline_mode)
     exps = model_df[model_df["phase"] == "experiment"]
+    max_seq_len = int(model_df["seq_len"].max())
 
     fig, ax = plt.subplots(figsize=(10, 6))
     ax.axhline(1.0, color="black", lw=1.8, ls="--", label="Baseline (=1.0)")
@@ -111,39 +115,46 @@ def plot_speedup(df: pd.DataFrame, model: str, baseline_mode: str) -> pathlib.Pa
         ax.plot(
             speedup.index,
             speedup.values,
-            lw=2,
-            ms=4,
-            label=f"NUM_MMA_KV={mma} (CTA_KV={cta_text})",
+            lw=1.45,
+            ms=3.2,
+            label=f"CTA_KV={cta_text}",
             **style,
         )
 
         summary_lines.append(
-            f"MMA {mma}: avg {speedup.mean():.3f}x, "
+            f"CTA_KV={cta_text}: avg {speedup.mean():.3f}x, "
             f"min {speedup.min():.3f}x, max {speedup.max():.3f}x"
         )
 
     ax.set_title(f"{model} KV Tile Speedup vs FlashInfer Auto Baseline")
     ax.set_xlabel("seq_len")
-    ax.set_ylabel("Speedup by latency: baseline_ms / experiment_ms")
-    ax.set_xscale("log", base=2)
-    format_seq_axis(ax)
+    ax.set_ylabel("Latency Speedup")
+    format_seq_axis(ax, max_seq_len)
     ax.grid(True, which="both", ls=":", alpha=0.45)
-    ax.legend(loc="best", fontsize=9)
+    ax.legend(loc="lower right", fontsize=9)
+    fig.text(
+        0.5,
+        0.015,
+        "CTA_KV: one CTA's KV-direction tile size, measured in KV tokens processed per tile.",
+        ha="center",
+        fontsize=8,
+    )
 
     if summary_lines:
         ax.text(
-            0.02,
+            0.82,
             0.02,
             "\n".join(summary_lines),
             transform=ax.transAxes,
             fontsize=8,
             va="bottom",
+            ha="right",
             bbox=dict(boxstyle="round,pad=0.35", fc="white", ec="#cccccc", alpha=0.9),
         )
 
     PLOTS_DIR.mkdir(parents=True, exist_ok=True)
     out = PLOTS_DIR / f"{model}_speedup_vs_baseline.png"
-    fig.tight_layout()
+    fig.tight_layout(rect=(0, 0.04, 1, 1))
     fig.savefig(out, dpi=180)
     plt.close(fig)
     return out
@@ -151,6 +162,7 @@ def plot_speedup(df: pd.DataFrame, model: str, baseline_mode: str) -> pathlib.Pa
 
 def plot_latency(df: pd.DataFrame, model: str) -> pathlib.Path:
     model_df = df[df["model"] == model].copy()
+    max_seq_len = int(model_df["seq_len"].max())
     fig, ax = plt.subplots(figsize=(10, 6))
 
     for phase, label, style in [
@@ -159,27 +171,35 @@ def plot_latency(df: pd.DataFrame, model: str) -> pathlib.Path:
     ]:
         g = model_df[model_df["phase"] == phase].sort_values("seq_len")
         if not g.empty:
-            ax.plot(g["seq_len"], g["ms"], lw=2.2, label=label, **style)
+            ax.plot(g["seq_len"], g["ms"], lw=1.7, label=label, **style)
 
     exps = model_df[model_df["phase"] == "experiment"]
     for mma, grp in sorted(exps.groupby("forced_mma"), key=lambda item: int(item[0])):
         mma = int(mma)
         g = grp.sort_values("seq_len")
         style = MMA_STYLES.get(mma, {})
-        ax.plot(g["seq_len"], g["ms"], lw=1.8, ms=3.5, label=f"NUM_MMA_KV={mma}", **style)
+        cta_vals = sorted(g["CTA_TILE_KV"].dropna().astype(int).unique().tolist())
+        cta_text = cta_vals[0] if len(cta_vals) == 1 else ",".join(map(str, cta_vals))
+        ax.plot(g["seq_len"], g["ms"], lw=1.45, ms=3.0, label=f"CTA_KV={cta_text}", **style)
 
     ax.set_title(f"{model} Latency")
     ax.set_xlabel("seq_len")
     ax.set_ylabel("Latency (ms)")
-    ax.set_xscale("log", base=2)
     ax.set_yscale("log")
-    format_seq_axis(ax)
+    format_seq_axis(ax, max_seq_len)
     ax.grid(True, which="both", ls=":", alpha=0.45)
     ax.legend(loc="best", fontsize=9)
+    fig.text(
+        0.5,
+        0.015,
+        "CTA_KV: one CTA's KV-direction tile size, measured in KV tokens processed per tile.",
+        ha="center",
+        fontsize=8,
+    )
 
     PLOTS_DIR.mkdir(parents=True, exist_ok=True)
     out = PLOTS_DIR / f"{model}_latency.png"
-    fig.tight_layout()
+    fig.tight_layout(rect=(0, 0.04, 1, 1))
     fig.savefig(out, dpi=180)
     plt.close(fig)
     return out
