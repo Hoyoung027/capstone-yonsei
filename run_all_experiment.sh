@@ -3,6 +3,7 @@
 #
 # Usage:
 #   bash run_all_experiment.sh
+#   bash run_all_experiment.sh split-k
 #
 # Logs are written under each experiment directory:
 #   prefill_kv_tile_experiment/results/logs/
@@ -23,6 +24,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PYTHON_BIN="${PYTHON_BIN:-${ROOT_DIR}/venv/bin/python}"
 TARGETS=(llama3_8b llama3_70b)
 RUN_ID="${RUN_ID:-$(date +%Y%m%d_%H%M%S)}"
+MODE="${1:-all}"
 
 run_step() {
     local name="$1"
@@ -123,8 +125,28 @@ run_experiments() {
     echo "tensor-core split-k correctness log: ${ROOT_DIR}/decode_tensor_core_experiment/results/logs/decode_tensor_core_split_k_correctness_full_${RUN_ID}.log"
 }
 
+run_selected_mode() {
+    case "${MODE}" in
+        all)
+            run_experiments
+            ;;
+        split-k|split_k|splitk)
+            cd "${ROOT_DIR}/decode_tensor_core_experiment"
+            export PYTHON_BIN
+            export PATH="$(dirname "${PYTHON_BIN}"):${PATH}"
+            run_decode_tc_split_k_correctness_sweep
+            ;;
+        *)
+            echo "Unknown mode: ${MODE}" >&2
+            echo "Usage: bash run_all_experiment.sh [all|split-k]" >&2
+            exit 1
+            ;;
+    esac
+}
+
 if [[ "${1:-}" == "--child" ]]; then
-    run_experiments
+    MODE="${2:-all}"
+    run_selected_mode
     exit 0
 fi
 
@@ -133,15 +155,30 @@ mkdir -p \
     "${ROOT_DIR}/decode_kv_tile_experiment/results/logs" \
     "${ROOT_DIR}/decode_tensor_core_experiment/results/logs"
 
-nohup bash "$0" --child > /dev/null 2>&1 &
-PID=$!
-
-echo "started run_all_experiment pid=${PID}"
-echo "prefill log: ${ROOT_DIR}/prefill_kv_tile_experiment/results/logs/prefill_kv_tile_${RUN_ID}.log"
-echo "decode log:  ${ROOT_DIR}/decode_kv_tile_experiment/results/logs/decode_kv_tile_${RUN_ID}.log"
-echo "tensor-core NUM_MMA_KV log: ${ROOT_DIR}/decode_tensor_core_experiment/results/logs/decode_tensor_core_num_mma_kv_${RUN_ID}.log"
-echo "tensor-core split-k correctness log: ${ROOT_DIR}/decode_tensor_core_experiment/results/logs/decode_tensor_core_split_k_correctness_full_${RUN_ID}.log"
-echo "follow prefill: tail -f ${ROOT_DIR}/prefill_kv_tile_experiment/results/logs/prefill_kv_tile_${RUN_ID}.log"
-echo "follow decode:  tail -f ${ROOT_DIR}/decode_kv_tile_experiment/results/logs/decode_kv_tile_${RUN_ID}.log"
-echo "follow tensor-core: tail -f ${ROOT_DIR}/decode_tensor_core_experiment/results/logs/decode_tensor_core_num_mma_kv_${RUN_ID}.log"
-echo "follow split-k: tail -f ${ROOT_DIR}/decode_tensor_core_experiment/results/logs/decode_tensor_core_split_k_correctness_full_${RUN_ID}.log"
+case "${MODE}" in
+    all)
+        nohup bash "$0" --child all > /dev/null 2>&1 &
+        PID=$!
+        echo "started run_all_experiment pid=${PID}"
+        echo "prefill log: ${ROOT_DIR}/prefill_kv_tile_experiment/results/logs/prefill_kv_tile_${RUN_ID}.log"
+        echo "decode log:  ${ROOT_DIR}/decode_kv_tile_experiment/results/logs/decode_kv_tile_${RUN_ID}.log"
+        echo "tensor-core NUM_MMA_KV log: ${ROOT_DIR}/decode_tensor_core_experiment/results/logs/decode_tensor_core_num_mma_kv_${RUN_ID}.log"
+        echo "tensor-core split-k correctness log: ${ROOT_DIR}/decode_tensor_core_experiment/results/logs/decode_tensor_core_split_k_correctness_full_${RUN_ID}.log"
+        echo "follow prefill: tail -f ${ROOT_DIR}/prefill_kv_tile_experiment/results/logs/prefill_kv_tile_${RUN_ID}.log"
+        echo "follow decode:  tail -f ${ROOT_DIR}/decode_kv_tile_experiment/results/logs/decode_kv_tile_${RUN_ID}.log"
+        echo "follow tensor-core: tail -f ${ROOT_DIR}/decode_tensor_core_experiment/results/logs/decode_tensor_core_num_mma_kv_${RUN_ID}.log"
+        echo "follow split-k: tail -f ${ROOT_DIR}/decode_tensor_core_experiment/results/logs/decode_tensor_core_split_k_correctness_full_${RUN_ID}.log"
+        ;;
+    split-k|split_k|splitk)
+        nohup bash "$0" --child split-k > "${ROOT_DIR}/decode_tensor_core_experiment/results/logs/decode_tensor_core_split_k_correctness_full_${RUN_ID}.log" 2>&1 &
+        PID=$!
+        echo "started split-k experiment pid=${PID}"
+        echo "tensor-core split-k correctness log: ${ROOT_DIR}/decode_tensor_core_experiment/results/logs/decode_tensor_core_split_k_correctness_full_${RUN_ID}.log"
+        echo "follow split-k: tail -f ${ROOT_DIR}/decode_tensor_core_experiment/results/logs/decode_tensor_core_split_k_correctness_full_${RUN_ID}.log"
+        ;;
+    *)
+        echo "Unknown mode: ${MODE}" >&2
+        echo "Usage: bash run_all_experiment.sh [all|split-k]" >&2
+        exit 1
+        ;;
+esac

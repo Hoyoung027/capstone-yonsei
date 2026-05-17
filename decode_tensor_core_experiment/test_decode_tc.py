@@ -104,7 +104,7 @@ def make_wrapper(kv_indptr, kv_indices, kv_last, num_qo_heads, num_kv_heads, hea
                  page_size, backend, fixed_split_size=None, disable_split_kv=False):
     # FlashInfer가 plan/run 중 임시 버퍼로 쓰는 workspace.
     # split-k를 켜면 partial states와 merge에도 이 공간이 사용된다.
-    workspace = torch.empty(128 * 1024 * 1024, dtype=torch.uint8, device=DEVICE)
+    workspace = torch.empty(512 * 1024 * 1024, dtype=torch.uint8, device=DEVICE)
     wrapper = flashinfer.BatchDecodeWithPagedKVCacheWrapper(
         workspace,
         "NHD",
