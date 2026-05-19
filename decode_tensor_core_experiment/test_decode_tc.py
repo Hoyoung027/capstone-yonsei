@@ -204,6 +204,16 @@ def parse_optional_int(text):
     return int(text)
 
 
+def fixed_split_size_from_count(kv_len, page_size, split_k_count):
+    # FlashInfer fixed_split_size is page-based. Convert a requested split-k
+    # count into the smallest page chunk that yields at most that many chunks.
+    if split_k_count is None:
+        return None
+    if split_k_count <= 0:
+        raise ValueError("split_k_count must be positive")
+    return max(1, math.ceil(kv_len / (split_k_count * page_size)))
+
+
 def summarize_int_list(values):
     if not values:
         return "empty"
@@ -263,7 +273,13 @@ def get_split_kv_plan_info(wrapper, kv_len, page_size):
 
 
 def run(label, num_qo_heads, num_kv_heads, head_dim, batch_size, page_size, kv_lens,
-        backend, dtype, fixed_split_size=None, disable_split_kv=False, skip_correctness=False):
+        backend, dtype, fixed_split_size=None, disable_split_kv=False,
+        target_split_k=None, skip_correctness=False):
+    if target_split_k is not None and fixed_split_size is not None:
+        raise ValueError("target_split_k and fixed_split_size are mutually exclusive")
+    if target_split_k is not None and disable_split_kv:
+        raise ValueError("target_split_k cannot be used with disable_split_kv")
+
     print(SEP)
     print(f"  label={label}")
     props = torch.cuda.get_device_properties(0)
@@ -271,12 +287,12 @@ def run(label, num_qo_heads, num_kv_heads, head_dim, batch_size, page_size, kv_l
     print(f"  batch={batch_size}  heads={num_qo_heads}/{num_kv_heads}  "
           f"dim={head_dim}  page={page_size}  dtype={dtype_label(dtype)}")
     print(f"  wrapper: BatchDecodeWithPagedKVCacheWrapper(use_tensor_cores=True, backend={backend})")
-    print(f"  fixed_split_size={fixed_split_size}  disable_split_kv={disable_split_kv}")
+    print(f"  fixed_split_size={fixed_split_size}  target_split_k={target_split_k}  disable_split_kv={disable_split_kv}")
     print(f"  kv_len: {summarize_int_list(kv_lens)}")
     print(SEP)
 
     print(f"\n  {'kv_len':>8}  {'CTA_Q':>6}  {'CTA_KV':>7}  {'MMA_KV':>7}  "
-          f"{'WRP_KV':>7}  {'split':>5}  {'chunk_tok':>9}  {'chunks':>6}  "
+          f"{'WRP_KV':>7}  {'split':>5}  {'req_k':>5}  {'chunk_tok':>9}  {'chunks':>6}  "
           f"{'ms':>8}  {'TFLOPS':>8}  {'GB/s est':>9}  correctness")
     print(f"  {'-'*140}")
 
@@ -289,6 +305,11 @@ def run(label, num_qo_heads, num_kv_heads, head_dim, batch_size, page_size, kv_l
         kv_cache, kv_indptr, kv_indices, kv_last = make_paged_kv(
             seq_lens, num_kv_heads, head_dim, page_size, dtype
         )
+        effective_fixed_split_size = (
+            fixed_split_size_from_count(kv_len, page_size, target_split_k)
+            if target_split_k is not None
+            else fixed_split_size
+        )
         wrapper = make_wrapper(
             kv_indptr,
             kv_indices,
@@ -298,7 +319,7 @@ def run(label, num_qo_heads, num_kv_heads, head_dim, batch_size, page_size, kv_l
             head_dim,
             page_size,
             backend,
-            fixed_split_size,
+            effective_fixed_split_size,
             disable_split_kv,
         )
 
@@ -334,8 +355,9 @@ def run(label, num_qo_heads, num_kv_heads, head_dim, batch_size, page_size, kv_l
         chunk_tok = split_plan.get("kv_chunk_size_tokens", "")
         chunks = split_plan.get("num_chunks_kv", "")
 
+        req_k = "" if target_split_k is None else target_split_k
         print(f"  {kv_len:>8}  {str(cta_q):>6}  {str(cta_kv):>7}  {str(mma_kv):>7}  "
-              f"{str(wrp_kv):>7}  {str(split_kv):>5}  {str(chunk_tok):>9}  {str(chunks):>6}  "
+              f"{str(wrp_kv):>7}  {str(split_kv):>5}  {str(req_k):>5}  {str(chunk_tok):>9}  {str(chunks):>6}  "
               f"{ms:>8.4f}  {tf:>8.3f}  {gbps:>9.1f}  {corr}")
 
         rows.append({
@@ -349,7 +371,10 @@ def run(label, num_qo_heads, num_kv_heads, head_dim, batch_size, page_size, kv_l
             "dtype": dtype_label(dtype),
             "use_tensor_cores": 1,
             "backend": backend,
-            "fixed_split_size": "" if fixed_split_size is None else fixed_split_size,
+            "fixed_split_size": "" if effective_fixed_split_size is None else effective_fixed_split_size,
+            "requested_fixed_split_size": "" if fixed_split_size is None else fixed_split_size,
+            "target_split_k": "" if target_split_k is None else target_split_k,
+            "split_k_count": "" if target_split_k is None else target_split_k,
             "disable_split_kv": int(disable_split_kv),
             **split_plan,
             **{k: str(v) for k, v in tile.items()},
@@ -404,6 +429,7 @@ if __name__ == "__main__":
         default=os.environ.get("DTYPE", "float16"),
     )
     parser.add_argument("--fixed_split_size", type=str, default=None)
+    parser.add_argument("--target_split_k", type=str, default=None)
     parser.add_argument("--disable_split_kv", action="store_true")
     parser.add_argument(
         "--kv_lens",
@@ -426,6 +452,7 @@ if __name__ == "__main__":
         dtype=parse_dtype(args.dtype),
         fixed_split_size=parse_optional_int(args.fixed_split_size),
         disable_split_kv=args.disable_split_kv,
+        target_split_k=parse_optional_int(args.target_split_k),
         skip_correctness=args.skip_correctness,
     )
     save_csv(rows, parse_dtype(args.dtype))

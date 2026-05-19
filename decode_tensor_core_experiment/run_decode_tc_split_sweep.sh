@@ -1,70 +1,30 @@
 #!/bin/bash
-# Sweep split-k settings for tensor-core decode NUM_MMA_KV experiments.
-# 
-# 실험 동작
-# 모델명을 인자로 넘겨 실행합니다. 인자를 생략하면 llama3_8b를 실행합니다.
+# Tensor-core decode split-k count sweep.
 #
-# 지원 모델:
-#   llama3_8b llama3_70b qwen2.5_72b gemma2_9b gemma2_27b
-#   llama qwen gemma  # 모델 그룹
+# 이 스크립트는 /root/capstone-yonsei/decode_tensor_core_experiment 안에서 실행하는 것을 기준으로 한다.
 #
-# 실행 예:
-#   bash run_decode_tc_split_sweep.sh llama3_8b
-#   bash run_decode_tc_split_sweep.sh llama3_70b
-#   MODEL=gemma2_27b bash run_decode_tc_split_sweep.sh
-#   DTYPE=bf16 bash run_decode_tc_split_sweep.sh llama3_8b
+# 주요 실험 대상:
+#   - 모델: llama3_8b
+#   - split-k count k: 1..20, SPLIT_MODES="k_1 ... k_20" 형태로 지정
+#   - batch size: 1, 2, 4, 8, 16
+#   - NUM_MMA_KV: auto baseline + 1 강제 + 2 강제
+#   - kv_len: 128..8192, 128 간격
+#   - correctness: SKIP_CORRECTNESS=0이면 수행
 #
-# 정식 study 실행:
-#   nohup env SPLIT_MODES=study KV_LENS="$(seq -s ' ' 128 128 8192)" bash run_decode_tc_split_sweep.sh llama3_8b > results/logs/run_decode_tc_split_study_llama3_8b_$(date +%Y%m%d_%H%M%S).log 2>&1 &
-#   nohup env SPLIT_MODES=study KV_LENS="$(seq -s ' ' 128 128 8192)" bash run_decode_tc_split_sweep.sh llama3_70b > results/logs/run_decode_tc_split_study_llama3_70b_$(date +%Y%m%d_%H%M%S).log 2>&1 &
-
-# 실험 조합
-# split_auto    + MMA auto, 1, 2
-# split_off     + MMA auto, 1, 2
-# fixed_16      + MMA auto, 1, 2
-# fixed_32      + MMA auto, 1, 2
-# fixed_64      + MMA auto, 1, 2
-# fixed_128     + MMA auto, 1, 2
-# fixed_256     + MMA auto, 1, 2
-# fixed_512     + MMA auto, 1, 2
-# fixed_1024    + MMA auto, 1, 2
-# fixed_2048    + MMA auto, 1, 2
-# fixed_4096    + MMA auto, 1, 2
-# fixed_8192    + MMA auto, 1, 2
-
-# 가능한 모델
-# llama3_8b     q_heads=32  kv_heads=8   group=4  head_dim=128
-# llama3_70b    q_heads=64  kv_heads=8   group=8  head_dim=128
-# qwen2.5_72b   q_heads=64  kv_heads=8   group=8  head_dim=128
-# gemma2_9b     q_heads=16  kv_heads=8   group=2  head_dim=256
-# gemma2_27b    q_heads=32  kv_heads=16  group=2  head_dim=128
+# 내부 동작:
+#   k_N은 각 kv_len마다 FlashInfer fixed_split_size(page 단위)로 변환된다.
+#   fixed_split_size_pages = ceil(kv_len / (N * page_size))
+#   CSV에는 요청한 split_k_count와 FlashInfer plan에서 읽은 실제 num_chunks_kv가 함께 저장된다.
 #
-# 그룹 실행
-# llama         llama3_8b + llama3_70b
-# qwen          qwen2.5_72b
-# gemma         gemma2_9b + gemma2_27b
+# 단일 batch 실행:
+#   env SPLIT_MODES="$(seq -f 'k_%g' -s ' ' 1 20)" KV_LENS="$(seq -s ' ' 128 128 8192)" BATCH_SIZE=1 MMA_KV_VALS="1 2" SKIP_CORRECTNESS=0 bash run_decode_tc_split_sweep.sh llama3_8b
 #
-# decode 미지원 preset
-# llama3_405b   group=16
-# qwen2.5_7b    group=7
-
-#
-# Usage:
-#   bash run_decode_tc_split_sweep.sh llama3_8b
-#   MODEL=llama3_70b bash run_decode_tc_split_sweep.sh
-#   SPLIT_MODES="auto off fixed_256 fixed_512 fixed_1024 fixed_2048" bash run_decode_tc_split_sweep.sh llama3_8b
-#   SPLIT_MODES=full bash run_decode_tc_split_sweep.sh llama3_8b
-#   SPLIT_MODES=all KV_LENS="$(seq -s ' ' 128 128 8192)" bash run_decode_tc_split_sweep.sh llama3_8b
-#   SPLIT_MODES=study KV_LENS="$(seq -s ' ' 128 128 8192)" bash run_decode_tc_split_sweep.sh llama3_8b
-#   STOP_ON_ERROR=1 bash run_decode_tc_split_sweep.sh llama3_8b
-#
-# Nohup:
+# 모든 batch를 nohup으로 순차 실행:
 #   mkdir -p results/logs
-#   nohup bash run_decode_tc_split_sweep.sh llama3_8b > results/logs/run_decode_tc_split_sweep_llama3_8b_$(date +%Y%m%d_%H%M%S).log 2>&1 &
-#   nohup env SPLIT_MODES=all KV_LENS="$(seq -s ' ' 128 128 8192)" bash run_decode_tc_split_sweep.sh llama3_8b > results/logs/run_decode_tc_split_all_llama3_8b_$(date +%Y%m%d_%H%M%S).log 2>&1 &
-#   nohup env SPLIT_MODES=study KV_LENS="$(seq -s ' ' 128 128 8192)" bash run_decode_tc_split_sweep.sh llama3_8b > results/logs/run_decode_tc_split_study_llama3_8b_$(date +%Y%m%d_%H%M%S).log 2>&1 &
-#   tail -f "$(ls -t results/logs/run_decode_tc_split*.log | head -n 1)"
+#   nohup bash -lc 'for bs in 1 2 4 8 16; do env SPLIT_MODES="$(seq -f '\''k_%g'\'' -s '\'' '\'' 1 20)" KV_LENS="$(seq -s '\'' '\'' 128 128 8192)" BATCH_SIZE="$bs" MMA_KV_VALS="1 2" SKIP_CORRECTNESS=0 bash run_decode_tc_split_sweep.sh llama3_8b; done' > results/logs/run_decode_tc_split_k1_20_all_batches_$(date +%Y%m%d_%H%M%S).log 2>&1 &
 #
+# 최신 로그 확인:
+#   tail -f "$(ls -t results/logs/run_decode_tc_split_k1_20_all_batches_*.log | head -n 1)"
 
 set -e
 cd "$(dirname "$0")"
@@ -138,7 +98,7 @@ for mode in $SPLIT_MODES; do
     echo ""
     echo "######## split mode: ${mode} ########"
 
-    unset FIXED_SPLIT_SIZE
+    unset FIXED_SPLIT_SIZE TARGET_SPLIT_K
     export DISABLE_SPLIT_KV=0
 
     case "$mode" in
@@ -158,9 +118,20 @@ for mode in $SPLIT_MODES; do
             export LABEL_SUFFIX="${DTYPE}_split_fixed_${size}"
             export FIXED_SPLIT_SIZE="$size"
             ;;
+        k_*|splitk_*|count_*)
+            count="${mode#k_}"
+            count="${count#splitk_}"
+            count="${count#count_}"
+            if ! [[ "$count" =~ ^[0-9]+$ ]] || [ "$count" -le 0 ]; then
+                echo "잘못된 split-k count mode: ${mode}"
+                exit 1
+            fi
+            export LABEL_SUFFIX="${DTYPE}_split_k_${count}"
+            export TARGET_SPLIT_K="$count"
+            ;;
         *)
             echo "알 수 없는 split mode: ${mode}"
-            echo "사용 가능: auto off fixed_N 또는 SPLIT_MODES=pilot|full|all|exhaustive|study|proper"
+            echo "사용 가능: auto off fixed_N k_N splitk_N count_N 또는 SPLIT_MODES=pilot|full|all|exhaustive|study|proper"
             exit 1
             ;;
     esac
@@ -186,7 +157,7 @@ for mode in $SPLIT_MODES; do
     fi
 done
 
-unset LABEL_SUFFIX FIXED_SPLIT_SIZE DISABLE_SPLIT_KV
+unset LABEL_SUFFIX FIXED_SPLIT_SIZE TARGET_SPLIT_K DISABLE_SPLIT_KV
 
 echo ""
 echo "========================================"

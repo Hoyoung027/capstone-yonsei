@@ -7,6 +7,7 @@
 #   bash run_decode_tc.sh llama3_8b qwen2.5_72b
 #   MMA_KV_VALS="1 2" bash run_decode_tc.sh llama3_8b
 #   LABEL_SUFFIX="split_fixed_512" FIXED_SPLIT_SIZE=512 bash run_decode_tc.sh llama3_8b
+#   LABEL_SUFFIX="split_k_4" TARGET_SPLIT_K=4 bash run_decode_tc.sh llama3_8b
 #   DTYPE=bf16 bash run_decode_tc.sh llama3_8b
 #   KV_LENS="128 1024" SKIP_CORRECTNESS=1 bash run_decode_tc.sh llama3_8b
 
@@ -32,6 +33,7 @@ PYTHON_BIN="${PYTHON_BIN:-/root/capstone-yonsei/venv/bin/python}"
 KV_LENS="${KV_LENS:-$(seq -s ' ' 128 128 8192)}"
 SKIP_CORRECTNESS="${SKIP_CORRECTNESS:-0}"
 FIXED_SPLIT_SIZE="${FIXED_SPLIT_SIZE:-}"
+TARGET_SPLIT_K="${TARGET_SPLIT_K:-}"
 DISABLE_SPLIT_KV="${DISABLE_SPLIT_KV:-0}"
 LABEL_SUFFIX="${LABEL_SUFFIX:-}"
 export PATH="$(dirname "$PYTHON_BIN"):$PATH"
@@ -65,6 +67,9 @@ run_model() {
     local args=()
     if [ -n "$FIXED_SPLIT_SIZE" ]; then
         args+=(--fixed_split_size "$FIXED_SPLIT_SIZE")
+    fi
+    if [ -n "$TARGET_SPLIT_K" ]; then
+        args+=(--target_split_k "$TARGET_SPLIT_K")
     fi
     if [ "$DISABLE_SPLIT_KV" = "1" ]; then
         args+=(--disable_split_kv)
@@ -165,7 +170,7 @@ echo " decode tensor-core KV tile suite: ${TARGETS[*]}"
 echo " order: baseline_before ${MMA_KV_VALS[*]/#/mma} baseline_after"
 echo " batch_size=${BATCH_SIZE} page_size=${PAGE_SIZE} backend=${BACKEND}"
 echo " dtype=${DTYPE}"
-echo " fixed_split_size=${FIXED_SPLIT_SIZE:-none} disable_split_kv=${DISABLE_SPLIT_KV}"
+echo " fixed_split_size=${FIXED_SPLIT_SIZE:-none} target_split_k=${TARGET_SPLIT_K:-none} disable_split_kv=${DISABLE_SPLIT_KV}"
 echo " label_suffix=${LABEL_SUFFIX:-none}"
 echo " kv_lens=$(summarize_lens)"
 echo " python=${PYTHON_BIN}"

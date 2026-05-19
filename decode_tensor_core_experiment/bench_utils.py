@@ -9,6 +9,7 @@ import torch
 
 WARMUP = 100
 REPEAT = 100
+TRIALS = 5
 
 
 def get_decode_tile_params(fn) -> dict:
@@ -93,19 +94,23 @@ def get_tensor_core_decode_tile_params(fn) -> dict:
     return {}
 
 
-def bench_ms(fn, warmup=WARMUP, repeat=REPEAT) -> float:
+def bench_ms(fn, warmup=WARMUP, repeat=REPEAT, trials=TRIALS) -> float:
     for _ in range(warmup):
         fn()
     torch.cuda.synchronize()
 
-    start = torch.cuda.Event(enable_timing=True)
-    end = torch.cuda.Event(enable_timing=True)
-    start.record()
-    for _ in range(repeat):
-        fn()
-    end.record()
-    torch.cuda.synchronize()
-    return start.elapsed_time(end) / repeat
+    trial_ms = []
+    for _ in range(trials):
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
+        start.record()
+        for _ in range(repeat):
+            fn()
+        end.record()
+        torch.cuda.synchronize()
+        trial_ms.append(start.elapsed_time(end) / repeat)
+
+    return float(torch.tensor(trial_ms).median().item())
 
 
 def decode_flops(batch_size, kv_len, num_qo_heads, head_dim) -> float:
