@@ -23,7 +23,7 @@ import matplotlib.ticker as ticker
 import pandas as pd
 
 
-ROOT = pathlib.Path(__file__).parent
+ROOT = pathlib.Path(__file__).resolve().parent.parent
 CSV_PATH = ROOT / "results" / "data" / "decode_tc_results_fp16.csv"
 PLOTS_DIR = ROOT / "results" / "plots" / "mma"
 
@@ -62,14 +62,21 @@ def parse_label(label: str) -> tuple[str, str, int | None]:
 
 
 def parse_condition(condition: str) -> tuple[str, str, int | None]:
-    # Full split-k sweep labels look like:
-    # llama3_8b_fp16_split_fixed_1024tok_bs16_correctness_full
-    match = re.fullmatch(r"(.+?)_fp16_split_(auto|off|fixed_\d+tok)_bs(\d+).*", condition)
+    # Supported labels include:
+    #   llama3_8b_float16_split_k_11_bs16
+    #   llama3_8b_fp16_split_fixed_1024tok_bs16
+    #   llama3_8b_float16_split_fixed_1024_bs16
+    match = re.fullmatch(
+        r"(.+?)_(?:fp16|float16|bf16|bfloat16)_split_(auto|off|fixed_\d+(?:tok)?|k_\d+)_bs(\d+).*",
+        condition,
+    )
     if match:
         model, split_mode, batch_size = match.groups()
+        fixed_match = re.fullmatch(r"fixed_(\d+)", split_mode)
+        if fixed_match:
+            split_mode = f"fixed_{fixed_match.group(1)}tok"
         return model, split_mode, int(batch_size)
 
-    # Older/simple labels do not encode split mode in the label; use CSV batch_size.
     return condition, "none", None
 
 
@@ -166,7 +173,7 @@ def plot_speedup(
     ax.axhline(1.0, color="black", lw=1.8, ls="--", label="NUM_MMA_KV auto baseline (=1.0)")
 
     for mma, speedup, rows in mma_speedup_series(condition_df, baseline_mode):
-        style = MMA_STYLES.get(mma, {})
+        style = {"marker": "o", **MMA_STYLES.get(mma, {})}
         actual_vals = sorted(rows["NUM_MMA_KV"].dropna().astype(int).unique().tolist())
         actual_text = actual_vals[0] if len(actual_vals) == 1 else ",".join(map(str, actual_vals))
         ax.plot(
@@ -215,7 +222,7 @@ def plot_latency(condition_df: pd.DataFrame, model: str, batch_size: int, split_
     ):
         mma = int(mma)
         g = grp.sort_values("kv_len")
-        style = MMA_STYLES.get(mma, {})
+        style = {"marker": "o", **MMA_STYLES.get(mma, {})}
         actual_vals = sorted(g["NUM_MMA_KV"].dropna().astype(int).unique().tolist())
         actual_text = actual_vals[0] if len(actual_vals) == 1 else ",".join(map(str, actual_vals))
         ax.plot(g["kv_len"], g["ms"], lw=1.45, ms=3.0, label=f"NUM_MMA_KV={actual_text}", **style)
@@ -251,8 +258,8 @@ def main() -> None:
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument(
         "--split",
-        default="auto",
-        help="split-k mode: auto, off, or fixed_<tokens>tok such as fixed_1024tok.",
+        default="k_1",
+        help="split-k mode: k_N, auto, off, or fixed_<tokens>tok such as fixed_1024tok.",
     )
     parser.add_argument(
         "--baseline",

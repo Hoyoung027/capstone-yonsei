@@ -30,7 +30,7 @@ import matplotlib.ticker as ticker
 import pandas as pd
 
 
-ROOT = pathlib.Path(__file__).parent
+ROOT = pathlib.Path(__file__).resolve().parent.parent
 CSV_PATH = ROOT / "results" / "data" / "decode_tc_results_fp16.csv"
 PLOTS_DIR = ROOT / "results" / "plots" / "max_splitk"
 
@@ -69,7 +69,10 @@ def split_sort_key(split_mode: str) -> tuple[int, int]:
     match = re.fullmatch(r"fixed_(\d+)tok", split_mode)
     if match:
         return (2, int(match.group(1)))
-    return (3, 0)
+    match = re.fullmatch(r"k_(\d+)", split_mode)
+    if match:
+        return (3, int(match.group(1)))
+    return (4, 0)
 
 
 def split_label(split_mode: str) -> str:
@@ -79,7 +82,10 @@ def split_label(split_mode: str) -> str:
         return "off"
     match = re.fullmatch(r"fixed_(\d+)tok", split_mode)
     if match:
-        return match.group(1)
+        return f"chunk={match.group(1)}"
+    match = re.fullmatch(r"k_(\d+)", split_mode)
+    if match:
+        return f"k={match.group(1)}"
     return split_mode
 
 
@@ -115,9 +121,19 @@ def parse_label(label: str) -> tuple[str, str, int | None]:
 
 
 def parse_condition(condition: str) -> tuple[str, str, int | None]:
-    match = re.fullmatch(r"(.+?)_fp16_split_(auto|off|fixed_\d+tok)_bs(\d+).*", condition)
+    # Supported labels include:
+    #   llama3_8b_float16_split_k_11_bs16
+    #   llama3_8b_fp16_split_fixed_1024tok_bs16
+    #   llama3_8b_float16_split_fixed_1024_bs16
+    match = re.fullmatch(
+        r"(.+?)_(?:fp16|float16|bf16|bfloat16)_split_(auto|off|fixed_\d+(?:tok)?|k_\d+)_bs(\d+).*",
+        condition,
+    )
     if match:
         model, split_mode, batch_size = match.groups()
+        fixed_match = re.fullmatch(r"fixed_(\d+)", split_mode)
+        if fixed_match:
+            split_mode = f"fixed_{fixed_match.group(1)}tok"
         return model, split_mode, int(batch_size)
     return condition, "none", None
 
@@ -188,6 +204,18 @@ def available_batches(df: pd.DataFrame, model: str) -> list[int]:
     return sorted(values.dropna().astype(int).unique().tolist())
 
 
+
+
+def resolve_base_split_mode(df: pd.DataFrame, model: str, batch_size: int, preferred: str = "auto") -> str:
+    modes = available_split_modes(df, model, batch_size)
+    if preferred in modes:
+        return preferred
+    if "k_1" in modes:
+        return "k_1"
+    if modes:
+        return modes[0]
+    raise SystemExit(f"no split modes for model={model}, batch={batch_size}")
+
 def available_split_modes(df: pd.DataFrame, model: str, batch_size: int) -> list[str]:
     values = df[
         (df["base_model"] == model)
@@ -206,9 +234,9 @@ def oracle_best_for_batch(
     split_modes: list[str],
     include_auto_candidate: bool,
 ) -> pd.DataFrame:
-    base = selected_mma_series(df, model, batch_size, "auto", mma, baseline_mode)
+    base = selected_mma_series(df, model, batch_size, resolve_base_split_mode(df, model, batch_size), mma, baseline_mode)
     if base.empty:
-        raise SystemExit(f"split auto baseline not found for model={model}, batch={batch_size}, mma={mma}")
+        raise SystemExit(f"baseline split mode not found for model={model}, batch={batch_size}, mma={mma}")
 
     candidates = []
     for split_mode in split_modes:
@@ -245,8 +273,8 @@ def best_mode_summary(best_df: pd.DataFrame) -> str:
 def plot_single_batch(best_df: pd.DataFrame, model: str, batch_size: int, mma: str) -> pathlib.Path:
     max_kv_len = int(best_df["kv_len"].max())
     fig, ax = plt.subplots(figsize=(10, 6))
-    ax.axhline(1.0, color="black", lw=1.8, ls="--", label="split auto baseline (=1.0)")
-    style = BATCH_STYLES.get(batch_size, {})
+    ax.axhline(1.0, color="black", lw=1.8, ls="--", label="baseline split mode (=1.0)")
+    style = {"marker": "o", **BATCH_STYLES.get(batch_size, {})}
     ax.plot(best_df["kv_len"], best_df["speedup"], lw=1.55, ms=3.0, label=f"oracle best split-k", **style)
 
     ax.set_title(f"{model} BS={batch_size} Oracle Best Split-k Speedup ({mma_label(mma)})")
@@ -268,7 +296,7 @@ def plot_single_batch(best_df: pd.DataFrame, model: str, batch_size: int, mma: s
     fig.text(
         0.5,
         0.015,
-        "For each kv_len, choose the split-k setting with the lowest latency; speedup is vs split auto.",
+        "For each kv_len, choose the split-k setting with the lowest latency; speedup is vs baseline split mode.",
         ha="center",
         fontsize=8,
     )
@@ -284,10 +312,10 @@ def plot_single_batch(best_df: pd.DataFrame, model: str, batch_size: int, mma: s
 def plot_batches(best_by_batch: dict[int, pd.DataFrame], model: str, mma: str) -> pathlib.Path:
     max_kv_len = max(int(df["kv_len"].max()) for df in best_by_batch.values())
     fig, ax = plt.subplots(figsize=(11, 6.2))
-    ax.axhline(1.0, color="black", lw=1.8, ls="--", label="split auto baseline (=1.0)")
+    ax.axhline(1.0, color="black", lw=1.8, ls="--", label="baseline split mode (=1.0)")
 
     for batch_size, best_df in best_by_batch.items():
-        style = BATCH_STYLES.get(batch_size, {})
+        style = {"marker": "o", **BATCH_STYLES.get(batch_size, {})}
         ax.plot(
             best_df["kv_len"],
             best_df["speedup"],
@@ -306,7 +334,7 @@ def plot_batches(best_by_batch: dict[int, pd.DataFrame], model: str, mma: str) -
     fig.text(
         0.5,
         0.015,
-        "For each batch and kv_len, choose the split-k setting with the lowest latency; speedup is vs split auto.",
+        "For each batch and kv_len, choose the split-k setting with the lowest latency; speedup is vs baseline split mode.",
         ha="center",
         fontsize=8,
     )

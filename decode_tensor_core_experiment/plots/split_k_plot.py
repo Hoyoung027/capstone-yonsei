@@ -25,7 +25,7 @@ import matplotlib.ticker as ticker
 import pandas as pd
 
 
-ROOT = pathlib.Path(__file__).parent
+ROOT = pathlib.Path(__file__).resolve().parent.parent
 CSV_PATH = ROOT / "results" / "data" / "decode_tc_results_fp16.csv"
 PLOTS_DIR = ROOT / "results" / "plots" / "split_k"
 
@@ -67,17 +67,23 @@ def split_sort_key(split_mode: str) -> tuple[int, int]:
     match = re.fullmatch(r"fixed_(\d+)tok", split_mode)
     if match:
         return (2, int(match.group(1)))
-    return (3, 0)
+    match = re.fullmatch(r"k_(\d+)", split_mode)
+    if match:
+        return (3, int(match.group(1)))
+    return (4, 0)
 
 
 def split_label(split_mode: str) -> str:
     if split_mode == "auto":
-        return "split auto"
+        return "auto"
     if split_mode == "off":
-        return "split off"
+        return "off"
     match = re.fullmatch(r"fixed_(\d+)tok", split_mode)
     if match:
         return f"chunk={match.group(1)}"
+    match = re.fullmatch(r"k_(\d+)", split_mode)
+    if match:
+        return f"k={match.group(1)}"
     return split_mode
 
 
@@ -96,9 +102,19 @@ def parse_label(label: str) -> tuple[str, str, int | None]:
 
 
 def parse_condition(condition: str) -> tuple[str, str, int | None]:
-    match = re.fullmatch(r"(.+?)_fp16_split_(auto|off|fixed_\d+tok)_bs(\d+).*", condition)
+    # Supported labels include:
+    #   llama3_8b_float16_split_k_11_bs16
+    #   llama3_8b_fp16_split_fixed_1024tok_bs16
+    #   llama3_8b_float16_split_fixed_1024_bs16
+    match = re.fullmatch(
+        r"(.+?)_(?:fp16|float16|bf16|bfloat16)_split_(auto|off|fixed_\d+(?:tok)?|k_\d+)_bs(\d+).*",
+        condition,
+    )
     if match:
         model, split_mode, batch_size = match.groups()
+        fixed_match = re.fullmatch(r"fixed_(\d+)", split_mode)
+        if fixed_match:
+            split_mode = f"fixed_{fixed_match.group(1)}tok"
         return model, split_mode, int(batch_size)
     return condition, "none", None
 
@@ -164,6 +180,18 @@ def available_batches(df: pd.DataFrame, model: str) -> list[int]:
     return sorted(values.dropna().astype(int).unique().tolist())
 
 
+
+
+def resolve_base_split_mode(df: pd.DataFrame, model: str, batch_size: int, preferred: str = "auto") -> str:
+    modes = available_split_modes(df, model, batch_size)
+    if preferred in modes:
+        return preferred
+    if "k_1" in modes:
+        return "k_1"
+    if modes:
+        return modes[0]
+    raise SystemExit(f"no split modes for model={model}, batch={batch_size}")
+
 def available_split_modes(df: pd.DataFrame, model: str, batch_size: int) -> list[str]:
     values = df[
         (df["base_model"] == model)
@@ -174,10 +202,13 @@ def available_split_modes(df: pd.DataFrame, model: str, batch_size: int) -> list
 
 
 def split_speedup_series(df: pd.DataFrame, model: str, batch_size: int, split_mode: str, baseline_mode: str):
-    base_df = select_auto_condition(df, model, batch_size, "auto")
+    base_split_mode = resolve_base_split_mode(df, model, batch_size)
+    base_df = select_auto_condition(df, model, batch_size, base_split_mode)
     base = baseline_series(base_df, baseline_mode)
     if base.empty:
-        raise SystemExit(f"split auto MMA auto baseline not found for model={model}, batch={batch_size}")
+        raise SystemExit(
+            f"baseline split mode {base_split_mode} not found for model={model}, batch={batch_size}"
+        )
 
     cond_df = select_auto_condition(df, model, batch_size, split_mode)
     series = baseline_series(cond_df, baseline_mode)
@@ -196,13 +227,14 @@ def plot_batch_speedup(
 ) -> pathlib.Path:
     max_kv_len = int(df[(df["base_model"] == model) & (df["condition_batch_size"] == batch_size)]["kv_len"].max())
     fig, ax = plt.subplots(figsize=(10, 6))
-    ax.axhline(1.0, color="black", lw=1.8, ls="--", label="split auto baseline (=1.0)")
+    base_split_mode = resolve_base_split_mode(df, model, batch_size)
+    ax.axhline(1.0, color="black", lw=1.8, ls="--", label=f"{split_label(base_split_mode)} baseline (=1.0)")
 
     for split_mode in split_modes:
         speedup = split_speedup_series(df, model, batch_size, split_mode, baseline_mode)
         if speedup is None:
             continue
-        style = SPLIT_STYLES.get(split_mode, {})
+        style = {"marker": "o", "ls": "-", **SPLIT_STYLES.get(split_mode, {})}
         ax.plot(speedup.index, speedup.values, lw=1.35, ms=2.8, label=split_label(split_mode), **style)
 
     ax.set_title(f"{model} BS={batch_size} Tensor-Core Decode Split-k Speedup (NUM_MMA_KV auto)")
@@ -214,7 +246,7 @@ def plot_batch_speedup(
     fig.text(
         0.5,
         0.015,
-        "split-k chunk sizes are token-based; speedup is relative to split auto with NUM_MMA_KV auto.",
+        f"Speedup is relative to {split_label(base_split_mode)} with NUM_MMA_KV auto.",
         ha="center",
         fontsize=8,
     )
@@ -242,13 +274,14 @@ def plot_batches_overview(
     legend_handles = None
     legend_labels = None
     for ax, batch_size in zip(axes.flat, batch_sizes):
-        ax.axhline(1.0, color="black", lw=1.4, ls="--", label="split auto (=1.0)")
+        base_split_mode = resolve_base_split_mode(df, model, batch_size)
+        ax.axhline(1.0, color="black", lw=1.4, ls="--", label=f"{split_label(base_split_mode)} (=1.0)")
         max_kv_len = int(df[(df["base_model"] == model) & (df["condition_batch_size"] == batch_size)]["kv_len"].max())
         for split_mode in split_modes_by_batch[batch_size]:
             speedup = split_speedup_series(df, model, batch_size, split_mode, baseline_mode)
             if speedup is None:
                 continue
-            style = SPLIT_STYLES.get(split_mode, {})
+            style = {"marker": "o", "ls": "-", **SPLIT_STYLES.get(split_mode, {})}
             ax.plot(speedup.index, speedup.values, lw=1.1, ms=2.0, label=split_label(split_mode), **style)
         ax.set_title(f"batch={batch_size}")
         ax.set_xlabel("kv_len")
@@ -275,7 +308,7 @@ def plot_batches_overview(
     fig.text(
         0.5,
         0.055,
-        "Speedup is relative to split auto at the same batch size; fixed split-k values are token chunk sizes.",
+        "Speedup is relative to the baseline split mode at the same batch size.",
         ha="center",
         fontsize=8,
     )

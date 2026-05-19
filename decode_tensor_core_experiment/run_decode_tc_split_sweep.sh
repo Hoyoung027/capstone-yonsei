@@ -5,7 +5,7 @@
 #
 # 주요 실험 대상:
 #   - 모델: llama3_8b
-#   - split-k count k: 1..20, SPLIT_MODES="k_1 ... k_20" 형태로 지정
+#   - split-k auto + split-k count k: 1..20, SPLIT_MODES=k_study 또는 "auto k_1 ... k_20" 형태로 지정
 #   - batch size: 1, 2, 4, 8, 16
 #   - NUM_MMA_KV: auto baseline + 1 강제 + 2 강제
 #   - kv_len: 128..8192, 128 간격
@@ -17,14 +17,14 @@
 #   CSV에는 요청한 split_k_count와 FlashInfer plan에서 읽은 실제 num_chunks_kv가 함께 저장된다.
 #
 # 단일 batch 실행:
-#   env SPLIT_MODES="$(seq -f 'k_%g' -s ' ' 1 20)" KV_LENS="$(seq -s ' ' 128 128 8192)" BATCH_SIZE=1 MMA_KV_VALS="1 2" SKIP_CORRECTNESS=0 bash run_decode_tc_split_sweep.sh llama3_8b
+#   env SPLIT_MODES=k_study KV_LENS="$(seq -s ' ' 128 128 8192)" BATCH_SIZE=1 MMA_KV_VALS="1 2" SKIP_CORRECTNESS=0 bash run_decode_tc_split_sweep.sh llama3_8b
 #
 # 모든 batch를 nohup으로 순차 실행:
 #   mkdir -p results/logs
-#   nohup bash -lc 'for bs in 1 2 4 8 16; do env SPLIT_MODES="$(seq -f '\''k_%g'\'' -s '\'' '\'' 1 20)" KV_LENS="$(seq -s '\'' '\'' 128 128 8192)" BATCH_SIZE="$bs" MMA_KV_VALS="1 2" SKIP_CORRECTNESS=0 bash run_decode_tc_split_sweep.sh llama3_8b; done' > results/logs/run_decode_tc_split_k1_20_all_batches_$(date +%Y%m%d_%H%M%S).log 2>&1 &
+#   nohup bash -lc 'for bs in 1 2 4 8 16; do env SPLIT_MODES=k_study KV_LENS="$(seq -s '\'' '\'' 128 128 8192)" BATCH_SIZE="$bs" MMA_KV_VALS="1 2" SKIP_CORRECTNESS=0 bash run_decode_tc_split_sweep.sh llama3_8b; done' > results/logs/run_decode_tc_split_auto_k1_20_all_batches_$(date +%Y%m%d_%H%M%S).log 2>&1 &
 #
 # 최신 로그 확인:
-#   tail -f "$(ls -t results/logs/run_decode_tc_split_k1_20_all_batches_*.log | head -n 1)"
+#   tail -f "$(ls -t results/logs/run_decode_tc_split_auto_k1_20_all_batches_*.log | head -n 1)"
 
 set -e
 cd "$(dirname "$0")"
@@ -47,6 +47,9 @@ case "${SPLIT_MODES:-pilot}" in
         ;;
     all|exhaustive|study|proper)
         SPLIT_MODES="auto off fixed_16 fixed_32 fixed_64 fixed_128 fixed_256 fixed_512 fixed_1024 fixed_2048 fixed_4096 fixed_8192"
+        ;;
+    k_study|splitk_study|count_study)
+        SPLIT_MODES="auto $(seq -f 'k_%g' -s ' ' 1 20)"
         ;;
     *)
         # Custom list, for example:
@@ -103,10 +106,10 @@ for mode in $SPLIT_MODES; do
 
     case "$mode" in
         auto)
-            export LABEL_SUFFIX="${DTYPE}_split_auto"
+            export LABEL_SUFFIX="${DTYPE}_split_auto_bs${BATCH_SIZE:-8}"
             ;;
         off|disable|disabled)
-            export LABEL_SUFFIX="${DTYPE}_split_off"
+            export LABEL_SUFFIX="${DTYPE}_split_off_bs${BATCH_SIZE:-8}"
             export DISABLE_SPLIT_KV=1
             ;;
         fixed_*)
@@ -115,7 +118,7 @@ for mode in $SPLIT_MODES; do
                 echo "잘못된 split mode: ${mode}"
                 exit 1
             fi
-            export LABEL_SUFFIX="${DTYPE}_split_fixed_${size}"
+            export LABEL_SUFFIX="${DTYPE}_split_fixed_${size}_bs${BATCH_SIZE:-8}"
             export FIXED_SPLIT_SIZE="$size"
             ;;
         k_*|splitk_*|count_*)
@@ -126,7 +129,7 @@ for mode in $SPLIT_MODES; do
                 echo "잘못된 split-k count mode: ${mode}"
                 exit 1
             fi
-            export LABEL_SUFFIX="${DTYPE}_split_k_${count}"
+            export LABEL_SUFFIX="${DTYPE}_split_k_${count}_bs${BATCH_SIZE:-8}"
             export TARGET_SPLIT_K="$count"
             ;;
         *)
