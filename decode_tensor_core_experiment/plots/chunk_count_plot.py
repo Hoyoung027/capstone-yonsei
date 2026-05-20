@@ -323,6 +323,9 @@ def plot_oracle_splitk_chunks(
     ax_speedup.set_title(f"{model} BS={batch_size} Oracle Split-k Summary")
     ax_speedup.set_ylabel("Speedup")
     ax_latency.set_ylabel("Latency (ms)")
+    if batch_size == 1:
+        ymin, ymax = ax_latency.get_ylim()
+        ax_latency.set_ylim(ymin, max(ymax, 0.070))
     ax_cta.set_ylabel("CTA_TILE_KV")
     ax_chunks.set_ylabel("num_chunks_kv")
     ax_chunks.set_xlabel("kv_len")
