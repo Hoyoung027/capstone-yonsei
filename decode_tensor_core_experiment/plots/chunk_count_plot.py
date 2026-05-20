@@ -3,7 +3,7 @@ Plot oracle split-k behavior for tensor-core decode.
 
 For each batch size, this script chooses the lowest-latency candidate at every
 kv_len across the selected split-k modes and NUM_MMA_KV settings. The graph
-shows latency speedup, oracle latency, the selected NUM_MMA_KV, and the
+shows latency speedup, oracle latency, the observed CTA_TILE_KV, and the
 num_chunks_kv for both the oracle and FlashInfer default.
 
 Input:
@@ -118,6 +118,7 @@ def load_results(csv_path: pathlib.Path) -> pd.DataFrame:
         "kv_len",
         "batch_size",
         "NUM_MMA_KV",
+        "CTA_TILE_KV",
         "ms",
         "kv_chunk_size_tokens",
         "kv_chunk_size_pages",
@@ -149,7 +150,7 @@ def aggregate_metric(condition_df: pd.DataFrame, mode: str) -> pd.DataFrame:
     if mode == "after" or before.empty:
         return after.sort_values("kv_len")
 
-    cols = ["ms", "NUM_MMA_KV", "num_chunks_kv", "kv_chunk_size_tokens", "kv_chunk_size_pages", "split_kv"]
+    cols = ["ms", "NUM_MMA_KV", "CTA_TILE_KV", "num_chunks_kv", "kv_chunk_size_tokens", "kv_chunk_size_pages", "split_kv"]
     merged = before[["kv_len", *cols]].merge(after[["kv_len", *cols]], on="kv_len", suffixes=("_before", "_after"))
     out = pd.DataFrame({"kv_len": merged["kv_len"]})
     for col in cols:
@@ -235,6 +236,7 @@ def build_oracle_plot_data(
     base_frame["default_ms"] = base_frame["ms"]
     base_frame["default_num_chunks_kv"] = base_frame["num_chunks_kv"]
     base_frame["default_NUM_MMA_KV"] = base_frame["NUM_MMA_KV"]
+    base_frame["default_CTA_TILE_KV"] = base_frame["CTA_TILE_KV"]
     base_indexed = base_frame.set_index("kv_len")
 
     candidate_rows = []
@@ -256,6 +258,7 @@ def build_oracle_plot_data(
             out["default_ms"] = base_indexed.loc[common, "default_ms"]
             out["default_num_chunks_kv"] = base_indexed.loc[common, "default_num_chunks_kv"]
             out["default_NUM_MMA_KV"] = base_indexed.loc[common, "default_NUM_MMA_KV"]
+            out["default_CTA_TILE_KV"] = base_indexed.loc[common, "default_CTA_TILE_KV"]
             out["speedup"] = out["default_ms"] / out["ms"]
             candidate_rows.append(
                 out.reset_index()[
@@ -266,9 +269,11 @@ def build_oracle_plot_data(
                         "ms",
                         "speedup",
                         "NUM_MMA_KV",
+                        "CTA_TILE_KV",
                         "num_chunks_kv",
                         "default_ms",
                         "default_NUM_MMA_KV",
+                        "default_CTA_TILE_KV",
                         "default_num_chunks_kv",
                     ]
                 ]
@@ -301,7 +306,7 @@ def plot_oracle_splitk_chunks(
         sharex=True,
         gridspec_kw={"height_ratios": [1.25, 1.15, 0.95, 1.15]},
     )
-    ax_speedup, ax_latency, ax_mma, ax_chunks = axes
+    ax_speedup, ax_latency, ax_cta, ax_chunks = axes
 
     ax_speedup.plot(oracle["kv_len"], oracle["speedup"], color="#1F77B4", marker="o", lw=1.8, ms=3.0, label="oracle speedup")
     ax_speedup.axhline(1.0, color="#333333", lw=1.2, ls="--", label="FlashInfer default (=1.0)")
@@ -309,8 +314,8 @@ def plot_oracle_splitk_chunks(
     ax_latency.plot(oracle["kv_len"], oracle["ms"], color="#D62728", marker="o", lw=1.7, ms=2.8, label="oracle latency")
     ax_latency.plot(base_frame["kv_len"], base_frame["default_ms"], color="#333333", marker="o", ls="--", lw=1.2, ms=2.4, label="FlashInfer default latency")
 
-    ax_mma.plot(oracle["kv_len"], oracle["NUM_MMA_KV"], color="#9467BD", marker="o", lw=1.5, ms=2.8, label="oracle NUM_MMA_KV")
-    ax_mma.plot(base_frame["kv_len"], base_frame["default_NUM_MMA_KV"], color="#555555", marker="o", ls="--", lw=1.1, ms=2.2, label="FlashInfer default NUM_MMA_KV")
+    ax_cta.plot(oracle["kv_len"], oracle["CTA_TILE_KV"], color="#9467BD", marker="o", lw=1.5, ms=2.8, label="oracle CTA_TILE_KV")
+    ax_cta.plot(base_frame["kv_len"], base_frame["default_CTA_TILE_KV"], color="#555555", marker="o", ls="--", lw=1.1, ms=2.2, label="FlashInfer default CTA_TILE_KV")
 
     ax_chunks.plot(oracle["kv_len"], oracle["plot_num_chunks_kv"], color="#2CA02C", marker="o", lw=1.7, ms=2.8, label="oracle num_chunks_kv")
     ax_chunks.plot(base_frame["kv_len"], base_frame["plot_default_num_chunks_kv"], color="#333333", marker="o", ls="--", lw=1.2, ms=2.4, label="FlashInfer default num_chunks_kv")
@@ -318,12 +323,12 @@ def plot_oracle_splitk_chunks(
     ax_speedup.set_title(f"{model} BS={batch_size} Oracle Split-k Summary")
     ax_speedup.set_ylabel("Speedup")
     ax_latency.set_ylabel("Latency (ms)")
-    ax_mma.set_ylabel("NUM_MMA_KV")
+    ax_cta.set_ylabel("CTA_TILE_KV")
     ax_chunks.set_ylabel("num_chunks_kv")
     ax_chunks.set_xlabel("kv_len")
     format_kv_axis(ax_chunks, max_kv_len)
 
-    ax_mma.yaxis.set_major_locator(ticker.MaxNLocator(integer=True))
+    ax_cta.yaxis.set_major_locator(ticker.MaxNLocator(integer=True))
     ax_chunks.yaxis.set_major_locator(ticker.MaxNLocator(integer=True))
     for ax in axes:
         ax.grid(True, which="both", ls=":", alpha=0.45)
@@ -332,7 +337,7 @@ def plot_oracle_splitk_chunks(
     fig.text(
         0.5,
         0.015,
-        "Oracle picks the lowest-latency split-k/NUM_MMA_KV candidate at each kv_len. split-k off is plotted as num_chunks_kv=0.",
+        "Oracle picks the lowest-latency split-k/NUM_MMA_KV candidate at each kv_len. CTA_TILE_KV is observed from the launched kernel.",
         ha="center",
         fontsize=8,
     )
