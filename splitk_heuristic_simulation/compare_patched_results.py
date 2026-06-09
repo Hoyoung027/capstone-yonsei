@@ -154,9 +154,9 @@ def plot_geomean(summary: pd.DataFrame, model: str, out_dir: Path) -> Path:
     for xpos, val in zip(x + width, summary["oracle_geomean_speedup"]):
         ax.text(xpos, val + 0.005, f"{val:.3f}x", ha="center", va="bottom", fontsize=10)
     ax.set_xticks(x)
-    ax.set_xticklabels([f"BS={int(v)}" for v in summary["batch_size"]])
+    ax.set_xticklabels([f"Batch Size={int(v)}" for v in summary["batch_size"]])
     ax.set_ylabel("Geomean latency speedup vs FlashInfer default")
-    ax.set_title(f"{model} Real Patched Split-k Heuristic vs Default and Oracle")
+    ax.set_title("Patched Split-K Heuristic vs Default and Oracle")
     ax.grid(True, axis="y", alpha=0.35, linestyle=":")
     ax.legend()
     fig.tight_layout()
