@@ -94,17 +94,10 @@ def build_comparison(default_df: pd.DataFrame, patched_df: pd.DataFrame, model: 
             default_chunks = float(base.loc[kv].get("num_chunks_kv", np.nan))
             patched_chunks = float(patched.loc[kv].get("num_chunks_kv", np.nan))
 
-            best_k_ms = float(oracle_rows.loc[kv, "ms"])
-            if default_ms <= best_k_ms:
-                oracle_ms = default_ms
-                oracle_chunks = default_chunks
-                oracle_k = 0
-                oracle_source = "default"
-            else:
-                oracle_ms = best_k_ms
-                oracle_chunks = float(oracle_rows.loc[kv].get("num_chunks_kv", np.nan))
-                oracle_k = int(oracle_rows.loc[kv, "split_k"])
-                oracle_source = f"k_{oracle_k}"
+            oracle_ms = float(oracle_rows.loc[kv, "ms"])
+            oracle_chunks = float(oracle_rows.loc[kv].get("num_chunks_kv", np.nan))
+            oracle_k = int(oracle_rows.loc[kv, "split_k"])
+            oracle_source = f"k_{oracle_k}"
 
             rows.append(
                 {
@@ -184,10 +177,10 @@ def plot_batch(comp: pd.DataFrame, model: str, bs: int, out_dir: Path) -> Path:
     axes[1].grid(True, alpha=0.35, linestyle=":")
     axes[1].legend()
 
-    axes[2].plot(grp["kv_len"], grp["default_chunks"], marker="o", ms=2.5, lw=1.3, label="default num_chunks_kv", color=DEFAULT_COLOR)
-    axes[2].plot(grp["kv_len"], grp["patched_chunks"], marker="o", ms=2.5, lw=1.3, label="patched num_chunks_kv", color=PATCHED_COLOR)
-    axes[2].plot(grp["kv_len"], grp["oracle_chunks"], marker="o", ms=2.5, lw=1.3, label="oracle num_chunks_kv", color=ORACLE_COLOR)
-    axes[2].set_ylabel("num_chunks_kv")
+    axes[2].plot(grp["kv_len"], grp["default_chunks"], marker="o", ms=2.5, lw=1.3, label="default # of chunks", color=DEFAULT_COLOR)
+    axes[2].plot(grp["kv_len"], grp["patched_chunks"], marker="o", ms=2.5, lw=1.3, label="patched # of chunks", color=PATCHED_COLOR)
+    axes[2].plot(grp["kv_len"], grp["oracle_chunks"], marker="o", ms=2.5, lw=1.3, label="oracle # of chunks", color=ORACLE_COLOR)
+    axes[2].set_ylabel("# of chunks")
     axes[2].set_xlabel("kv_len")
     axes[2].grid(True, alpha=0.35, linestyle=":")
     axes[2].legend()

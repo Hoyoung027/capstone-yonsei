@@ -326,8 +326,8 @@ def plot_oracle_splitk_chunks(
     if batch_size == 1:
         ymin, ymax = ax_latency.get_ylim()
         ax_latency.set_ylim(ymin, max(ymax, 0.070))
-    ax_cta.set_ylabel("CTA_TILE_KV")
-    ax_chunks.set_ylabel("num_chunks_kv")
+    ax_cta.set_ylabel("KV tile size")
+    ax_chunks.set_ylabel("# of chunks")
     ax_chunks.set_xlabel("kv_len")
     format_kv_axis(ax_chunks, max_kv_len)
 
@@ -360,7 +360,7 @@ def main() -> None:
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--batches", default=None, help="Batch sizes to plot, e.g. '1 2 4 8 16'.")
     parser.add_argument("--all-batches", action="store_true", help="Plot every available batch size for the selected model.")
-    parser.add_argument("--baseline", choices=["mean", "before", "after"], default="mean")
+    parser.add_argument("--baseline", choices=["mean", "before", "after"], default="before")
     parser.add_argument("--split-modes", default=None, help="Candidate split modes. Default: all available modes except auto.")
     parser.add_argument("--mma-candidates", default=None, help="Candidate NUM_MMA_KV values. Default: all available values, e.g. 'auto 1 2'.")
     parser.add_argument("--include-default-candidate", action="store_true", help="Include FlashInfer split-auto default itself as an oracle candidate.")
@@ -379,7 +379,7 @@ def main() -> None:
     saved = []
     for batch_size in batch_sizes:
         split_modes = parse_str_list(args.split_modes) or [
-            m for m in available_split_modes(df, args.model, batch_size) if m != "auto"
+            m for m in available_split_modes(df, args.model, batch_size) if m not in {"auto", "off"}
         ]
         mma_candidates = parse_str_list(args.mma_candidates) or available_mma_candidates(df, args.model, batch_size)
         base_frame, oracle = build_oracle_plot_data(
